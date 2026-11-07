@@ -45,19 +45,35 @@ WORST_HAND = [  # 8 decisions: the most one seat can face (exhaustive tree searc
 TYPICAL_HAND = [(Street.PREFLOP, 3, 1), (Street.FLOP, 8, 0), (Street.TURN, 16, 4)]
 
 
+# What bot/postflop.py needs before it runs Monte Carlo at all
+# (PARAMS["min_budget_ms"] / PARAMS["budget_frac"]); below it, the category fallback.
+from bot import postflop as _postflop  # noqa: E402
+
+POSTFLOP_MIN_MS = _postflop.PARAMS["min_budget_ms"] / _postflop.PARAMS["budget_frac"]
+
+# A calling station takes every hand to the river: 1 preflop + 3 postflop decisions.
+STATION_HAND = [(Street.PREFLOP, 3, 1), (Street.FLOP, 8, 0), (Street.TURN, 8, 0), (Street.RIVER, 8, 0)]
+
+
 def simulate(hand_shape, speed=1.0, mc_overshoot=1.10, policy_overhead_ms=None,
-             hand_end_ms=0.02, num_hands=NUM_DEALS):
-    """Play num_hands hands of hand_shape. Returns (memory, per-hand MC ms, budgets)."""
+             hand_end_ms=0.02, num_hands=NUM_DEALS, bank=TIME_BANK_SECONDS, preflop_asks=True):
+    """Play num_hands hands of hand_shape. Returns (memory, per-hand MC ms, budgets).
+
+    preflop_asks=False mimics bot/policy.py, where preflop plays from the table
+    and never calls budget_ms; `budgets` then holds only postflop budgets.
+    """
     timing.set_speed(speed)
     if policy_overhead_ms is None:
         policy_overhead_ms = 2 * timing.POLICY_OVERHEAD_MS * speed  # 2x what timing assumes
     mem = fresh_memory()
+    mem["_bank"] = mem["_time_left"] = bank
     mc_per_hand, budgets = [], []
     for h in range(num_hands):
         mc_this_hand = 0.0
         for street, pot, to_call in hand_shape:
             ms = 0.0
-            if mem["_time_left"] > EMERGENCY_RESERVE_S:
+            asks = preflop_asks or street != Street.PREFLOP
+            if asks and mem["_time_left"] > EMERGENCY_RESERVE_S:
                 ms = timing.budget_ms(mem, obs(h, street, pot, to_call))
                 budgets.append(ms)
             charged_ms = ms * mc_overshoot + policy_overhead_ms + timing.WRAPPER_OVERHEAD_MS
@@ -171,3 +187,50 @@ def test_underestimated_overhead_is_corrected_by_measurement():
     # Real non-MC cost is 6x the prior; the measured-overhead path must catch it.
     mem, _, _ = simulate(TYPICAL_HAND, policy_overhead_ms=6 * timing.POLICY_OVERHEAD_MS)
     assert mem["_spent"] <= LIMIT_S
+
+
+# --- the 4 s test bank (#35) --------------------------------------------------
+
+def test_reserve_scales_with_the_bank():
+    assert timing.reserve_s(TIME_BANK_SECONDS) == pytest.approx(timing.RESERVE_S)
+    assert timing.reserve_s(4.0) == pytest.approx(0.75)
+    assert timing.reserve_s(1.0) == timing.RESERVE_MIN_S
+
+
+def test_floor_clears_postflop_monte_carlo_minimum():
+    # Any non-zero budget must buy samples, not the made-hand fallback.
+    assert timing.FLOOR_MS > POSTFLOP_MIN_MS
+
+
+def test_4s_bank_grants_monte_carlo_to_most_postflop_decisions():
+    mem, _, budgets = simulate(TYPICAL_HAND, bank=4.0, preflop_asks=False)
+    assert len(budgets) == NUM_DEALS * (len(TYPICAL_HAND) - 1)
+    above = sum(b > POSTFLOP_MIN_MS for b in budgets) / len(budgets)
+    assert above >= 0.90, f"only {above:.1%} of postflop budgets clear {POSTFLOP_MIN_MS} ms"
+    assert mem["_spent"] <= 4.0 - timing.reserve_s(4.0)
+    assert mem["_time_left"] >= timing.reserve_s(4.0)
+
+
+def test_4s_bank_station_hands_stay_under_limit():
+    # 4 decisions every hand: the fixed overhead alone (4000 x 0.8 ms here) is
+    # almost the whole spendable bank, so few budgets fit; the limit still holds.
+    mem, _, budgets = simulate(STATION_HAND, bank=4.0, preflop_asks=False)
+    assert len(budgets) == NUM_DEALS * (len(STATION_HAND) - 1)
+    assert mem["_spent"] <= 4.0 - timing.reserve_s(4.0)
+    assert mem["_time_left"] >= timing.reserve_s(4.0)
+    assert all(b == 0.0 or b >= timing.FLOOR_MS for b in budgets)
+
+
+def test_4s_bank_worst_case_backs_off():
+    # 8 decisions every hand cost 6.4 s in fixed overhead alone, more than the
+    # 4 s bank: no budget can fix that, so Monte Carlo must add (almost) nothing.
+    mem, mc, budgets = simulate(WORST_HAND, bank=4.0, preflop_asks=False)
+    assert sum(mc) * 1.10 / 1000.0 < 0.1
+    assert max(budgets) <= timing.CEIL_MS
+
+
+def test_8s_bank_is_used_when_preflop_never_asks():
+    # Preflop plays from the table, so its share of the bank must go to postflop.
+    mem, _, _ = simulate(TYPICAL_HAND, preflop_asks=False)
+    assert mem["_spent"] <= LIMIT_S
+    assert mem["_spent"] >= 5.0, f"only used {mem['_spent']:.3f}s; preflop's share went unspent"
