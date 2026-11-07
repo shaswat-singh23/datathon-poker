@@ -27,10 +27,20 @@ Optional memory keys (never required, safe defaults):
 
 Thresholds live in PARAMS so tuning tickets (#12) can adjust them.
 
+Units: budget_ms is a wall-clock budget in MILLISECONDS for this decision,
+i.e. what bot/timing.py's budget_ms(memory, obs) returns. Never pass
+timing.samples_for() (that is a sample count). Whatever the caller passes, the
+Monte Carlo call gets at most PARAMS["max_mc_ms"] (20 ms by default), so a
+generous caller cannot push a single decision anywhere near the 100 ms limit.
+
+Randomness: pass a random.Random as `rng` and the whole decision (Monte Carlo
+sampling and the bluff coin) is reproducible. With rng=None a module-level
+seeded random.Random is used, so replays are still deterministic.
+
 The returned action is always in obs.legal_actions (best legal fallback), and
 the function never raises: if equity fails or the budget is too small, it
 falls back to a made-hand-category estimate. The equity engine is called at
-most once per decision with time_budget_ms <= budget_ms.
+most once per decision with time_budget_ms <= min(budget_ms, max_mc_ms).
 """
 from __future__ import annotations
 
@@ -59,14 +69,18 @@ PARAMS: dict = {
     # budget
     "budget_frac": 0.8,        # fraction of budget_ms handed to the equity engine
     "min_budget_ms": 0.25,     # below this (after budget_frac), skip Monte Carlo
+    "max_mc_ms": 20.0,         # hard cap on the Monte Carlo budget, whatever the caller passes
 }
 
-# made-hand category (evaluator.category_of: 0 high card .. 8 straight flush)
-# -> rough equity, used only when Monte Carlo is skipped or fails
-_CAT_EQ = (0.25, 0.45, 0.60, 0.70, 0.66, 0.80, 0.85, 0.92, 0.97)
+# made-hand category (evaluator.category_of) -> rough equity, used only when
+# Monte Carlo is skipped or fails. Index order follows evaluator.py's Short Deck
+# ranking: 0 high card, 1 pair, 2 two pair, 3 STRAIGHT, 4 THREE_OF_A_KIND,
+# 5 full house, 6 flush, 7 quads, 8 straight flush. Trips beat a straight and a
+# flush beats a full house here, so the values must be non-decreasing in index.
+_CAT_EQ = (0.25, 0.45, 0.60, 0.66, 0.70, 0.80, 0.85, 0.92, 0.97)
 
 _RAISES = (Action.RAISE_HALF, Action.RAISE_POT)
-_RNG = random.Random()
+_RNG = random.Random(20261107)  # seeded: decisions replay identically when rng=None
 
 
 def _params(memory) -> dict:
@@ -88,7 +102,12 @@ def _pick(prefs, legal) -> Action:
 
 
 def opp_min_pct(obs, memory, p=PARAMS) -> float:
-    """Range-narrowing percentile from opponent raises in this hand."""
+    """Range-narrowing percentile from opponent raises in this hand.
+
+    First pass: counts only the opponent's raises, ignoring position and calls
+    (an opponent who flat-called a 3-bet is still treated as a random hand).
+    #12 (exploitative adjustments) should refine this with the opponent model.
+    """
     pre = post = 0
     for h in obs.action_history or ():
         if h.is_me or h.action not in _RAISES:
@@ -117,19 +136,31 @@ def _fallback_equity(hole, board) -> float:
         return 0.4
 
 
-def estimate_equity(obs, memory, budget_ms, p=PARAMS) -> float:
-    """One Monte Carlo call within budget_ms, or the category fallback."""
-    hole, board = tuple(obs.hole_cards), tuple(obs.board)
+def mc_budget_ms(budget_ms, p=PARAMS) -> float:
+    """Milliseconds handed to the equity engine for a decision budget of budget_ms.
+
+    budget_frac of the budget, capped at max_mc_ms; 0.0 (skip Monte Carlo) when
+    the result would be below min_budget_ms or the input is not a number.
+    """
     try:
         budget_ms = float(budget_ms)
     except (TypeError, ValueError):
-        budget_ms = 0.0
-    budget = budget_ms * p["budget_frac"]
-    if not budget >= p["min_budget_ms"] or len(board) < 3:  # `not >=` also catches NaN
+        return 0.0
+    budget = min(budget_ms * p["budget_frac"], p["max_mc_ms"])
+    if not budget >= p["min_budget_ms"]:  # `not >=` also catches NaN
+        return 0.0
+    return budget
+
+
+def estimate_equity(obs, memory, budget_ms, p=PARAMS, rng=None) -> float:
+    """One Monte Carlo call within min(budget_ms, max_mc_ms), or the category fallback."""
+    hole, board = tuple(obs.hole_cards), tuple(obs.board)
+    budget = mc_budget_ms(budget_ms, p)
+    if budget <= 0.0 or len(board) < 3:
         return _fallback_equity(hole, board)
     try:
         e = float(_eq.equity(hole, board, opp_min_pct=opp_min_pct(obs, memory, p),
-                             time_budget_ms=min(budget, budget_ms)))
+                             time_budget_ms=budget, rng=rng if rng is not None else _RNG))
         if 0.0 <= e <= 1.0:
             return e
     except Exception:
@@ -171,7 +202,7 @@ def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
         if not isinstance(memory, dict):
             memory = {}
         p = _params(memory)
-        a = decide(estimate_equity(obs, memory, budget_ms, p), obs, p, rng)
+        a = decide(estimate_equity(obs, memory, budget_ms, p, rng), obs, p, rng)
         return a if a in legal else _pick((), legal)
     except Exception:
         return _pick((Action.CHECK_CALL, Action.FOLD), legal)
