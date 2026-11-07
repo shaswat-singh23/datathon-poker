@@ -1,0 +1,177 @@
+"""bot/postflop.py - flop / turn / river decisions.
+
+    postflop_action(obs, memory, budget_ms, rng=None) -> Action
+
+One Monte Carlo equity call (bot.equity.equity) against a range-narrowed
+opponent, compared with pot odds:
+
+* Facing a bet: pot_odds = to_call / (pot + to_call) (obs.pot already holds
+  every chip committed this hand, both players' current bets included).
+  Fold if equity < pot_odds + call_margin, call otherwise, raise half / pot
+  at the higher equity thresholds. Each raise already made on this street
+  raises the bar for (re)raising by `reraise_step`.
+* Checking is free: check back weak hands, bet half pot with good equity,
+  bet pot with very strong equity, and (optionally) bluff half pot with a
+  small frequency on the turn / river when equity is very low.
+
+Range narrowing (opp_min_pct): the opponent's range is cut to hands whose
+preflop percentile >= opp_min_pct. It rises with each opponent raise / bet in
+this hand (postflop raises count more than preflop ones) and is scaled down
+for opponents who are aggressive in general (they raise wider).
+
+Optional memory keys (never required, safe defaults):
+    memory["opp_aggression"]   float 0..1, the opponent's overall raise
+                               frequency (e.g. from bot/opponent_model.py).
+                               Default PARAMS["default_aggression"].
+    memory["postflop_params"]  dict of PARAMS overrides (merged over PARAMS).
+
+Thresholds live in PARAMS so tuning tickets (#12) can adjust them.
+
+The returned action is always in obs.legal_actions (best legal fallback), and
+the function never raises: if equity fails or the budget is too small, it
+falls back to a made-hand-category estimate. The equity engine is called at
+most once per decision with time_budget_ms <= budget_ms.
+"""
+from __future__ import annotations
+
+import random
+
+from game import Action
+
+from bot import equity as _eq
+
+PARAMS: dict = {
+    # facing a bet
+    "call_margin": 0.03,       # call if equity >= pot_odds + call_margin
+    "raise_half_eq": 0.72,     # raise half pot at or above this equity
+    "raise_pot_eq": 0.82,      # raise pot at or above this equity
+    "reraise_step": 0.06,      # each raise already made this street adds this to raise/bet thresholds
+    # checked to us / first to act
+    "bet_half_eq": 0.62,       # bet half pot at or above this equity
+    "bet_pot_eq": 0.78,        # bet pot at or above this equity
+    "bluff_freq": 0.10,        # chance to bluff half pot when free and equity is low (turn/river only)
+    "bluff_max_eq": 0.20,      # only bluff with equity below this
+    # range narrowing
+    "pct_per_pre_raise": 0.10,   # opp_min_pct added per opponent preflop raise
+    "pct_per_post_raise": 0.15,  # opp_min_pct added per opponent postflop bet/raise
+    "max_opp_pct": 0.70,         # cap on opp_min_pct
+    "default_aggression": 0.30,  # assumed opponent raise frequency when unknown
+    # budget
+    "budget_frac": 0.8,        # fraction of budget_ms handed to the equity engine
+    "min_budget_ms": 0.25,     # below this (after budget_frac), skip Monte Carlo
+}
+
+# made-hand category (evaluator.category_of: 0 high card .. 8 straight flush)
+# -> rough equity, used only when Monte Carlo is skipped or fails
+_CAT_EQ = (0.25, 0.45, 0.60, 0.70, 0.66, 0.80, 0.85, 0.92, 0.97)
+
+_RAISES = (Action.RAISE_HALF, Action.RAISE_POT)
+_RNG = random.Random()
+
+
+def _params(memory) -> dict:
+    over = memory.get("postflop_params")
+    if isinstance(over, dict) and over:
+        return {**PARAMS, **over}
+    return PARAMS
+
+
+def _pick(prefs, legal) -> Action:
+    """First action in prefs that is legal; then the safest legal one."""
+    for a in prefs:
+        if a in legal:
+            return a
+    for a in (Action.CHECK_CALL, Action.FOLD, Action.RAISE_HALF, Action.RAISE_POT):
+        if a in legal:
+            return a
+    return Action.CHECK_CALL  # nothing is legal; the shell handles that case
+
+
+def opp_min_pct(obs, memory, p=PARAMS) -> float:
+    """Range-narrowing percentile from opponent raises in this hand."""
+    pre = post = 0
+    for h in obs.action_history or ():
+        if h.is_me or h.action not in _RAISES:
+            continue
+        if int(h.street) == 0:
+            pre += 1
+        else:
+            post += 1
+    pct = pre * p["pct_per_pre_raise"] + post * p["pct_per_post_raise"]
+    try:
+        aggr = float(memory.get("opp_aggression", p["default_aggression"]))
+    except (TypeError, ValueError):
+        aggr = p["default_aggression"]
+    if not 0.0 <= aggr <= 1.0:  # also rejects NaN
+        aggr = p["default_aggression"]
+    # relative to the default: maniacs (aggr -> 1) narrow less, nits up to 1.3x
+    scale = min(1.3, max(0.5, 1.0 - (aggr - p["default_aggression"])))
+    return float(min(p["max_opp_pct"], max(0.0, pct * scale)))
+
+
+def _fallback_equity(hole, board) -> float:
+    try:
+        cat = int(_eq.hand_features(hole, board).get("category", 0))
+        return _CAT_EQ[max(0, min(8, cat))]
+    except Exception:
+        return 0.4
+
+
+def estimate_equity(obs, memory, budget_ms, p=PARAMS) -> float:
+    """One Monte Carlo call within budget_ms, or the category fallback."""
+    hole, board = tuple(obs.hole_cards), tuple(obs.board)
+    try:
+        budget_ms = float(budget_ms)
+    except (TypeError, ValueError):
+        budget_ms = 0.0
+    budget = budget_ms * p["budget_frac"]
+    if not budget >= p["min_budget_ms"] or len(board) < 3:  # `not >=` also catches NaN
+        return _fallback_equity(hole, board)
+    try:
+        e = float(_eq.equity(hole, board, opp_min_pct=opp_min_pct(obs, memory, p),
+                             time_budget_ms=min(budget, budget_ms)))
+        if 0.0 <= e <= 1.0:
+            return e
+    except Exception:
+        pass
+    return _fallback_equity(hole, board)
+
+
+def decide(eq, obs, p=PARAMS, rng=None) -> Action:
+    """Pure decision from an equity estimate (no Monte Carlo)."""
+    legal = tuple(obs.legal_actions)
+    to_call = max(0, int(obs.to_call))
+    step = p["reraise_step"] * max(0, int(obs.raises_this_street))
+    if to_call == 0:
+        if eq >= p["bet_pot_eq"] + step:
+            return _pick((Action.RAISE_POT, Action.RAISE_HALF), legal)
+        if eq >= p["bet_half_eq"] + step:
+            return _pick((Action.RAISE_HALF, Action.RAISE_POT), legal)
+        if (p["bluff_freq"] > 0 and eq < p["bluff_max_eq"] and len(obs.board) >= 4
+                and (rng or _RNG).random() < p["bluff_freq"]):
+            return _pick((Action.RAISE_HALF, Action.CHECK_CALL), legal)
+        return _pick((Action.CHECK_CALL,), legal)
+    pot_odds = to_call / float(max(1, int(obs.pot)) + to_call)
+    if eq >= p["raise_pot_eq"] + step:
+        return _pick((Action.RAISE_POT, Action.RAISE_HALF, Action.CHECK_CALL), legal)
+    if eq >= p["raise_half_eq"] + step:
+        return _pick((Action.RAISE_HALF, Action.RAISE_POT, Action.CHECK_CALL), legal)
+    if eq >= pot_odds + p["call_margin"]:
+        return _pick((Action.CHECK_CALL,), legal)
+    return _pick((Action.FOLD, Action.CHECK_CALL), legal)
+
+
+def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
+    """Flop/turn/river action; always in obs.legal_actions, never raises."""
+    try:
+        legal = tuple(obs.legal_actions)
+    except Exception:
+        return Action.CHECK_CALL
+    try:
+        if not isinstance(memory, dict):
+            memory = {}
+        p = _params(memory)
+        a = decide(estimate_equity(obs, memory, budget_ms, p), obs, p, rng)
+        return a if a in legal else _pick((), legal)
+    except Exception:
+        return _pick((Action.CHECK_CALL, Action.FOLD), legal)
