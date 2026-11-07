@@ -195,6 +195,13 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
     if len(matches) < len(all_matches):
         print(f"warning: skipping {len(all_matches) - len(matches)} crashed match(es); "
               "overall bb/deal may differ from sim's", file=sys.stderr)
+    if hero is None:  # default "bot A" only makes sense when every match has the same bot A
+        heroes = sorted({str(m.get("bot_a", "")) for m in matches})
+        if len(heroes) > 1:
+            print("analyze: this JSON has several different bot A's "
+                  f"({', '.join(os.path.basename(h) for h in heroes)}); pass --hero.",
+                  file=sys.stderr)
+            return 1
     by_street: dict[str, Cell] = defaultdict(Cell)
     by_pos: dict[str, Cell] = defaultdict(Cell)
     by_bucket: dict[str, Cell] = defaultdict(Cell)
@@ -306,7 +313,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Break a sim.py JSON down by street, position, "
                                 "preflop percentile and action.")
     p.add_argument("json", help="sim JSON to read (or to write first, with --generate)")
-    p.add_argument("--hero", help="whose view: bot name or file (default: bot A of each match)")
+    p.add_argument("--hero", help="whose view: bot name or file (default: bot A, only when "
+                   "every match has the same bot A)")
     p.add_argument("--top", type=int, default=10, help="how many expensive situations to list")
     g = p.add_argument_group("--generate (run matches with per-hand logs, then analyze)")
     g.add_argument("--generate", action="store_true")
