@@ -268,8 +268,9 @@ def test_flop_bluffs_only_when_enabled(no_mc):
     while len(obs.board) != 3:
         obs = _obs(rng, to_call=0, legal_actions=legal, raises_this_street=0)
     no_mc["eq"] = 0.05
-    on = {"postflop_params": {"bluff_freq": 0.5, "bluff_max_eq": 0.3, "bluff_min_board": 3}}
-    off = {"postflop_params": {"bluff_freq": 0.5, "bluff_max_eq": 0.3, "bluff_min_board": 4}}
+    # flop bluffs follow flop_bluff_freq / flop_bluff_max_eq, not the turn/river bluff_freq
+    on = {"postflop_params": {"bluff_freq": 0.0, "flop_bluff_freq": 0.5, "flop_bluff_max_eq": 0.3}}
+    off = {"postflop_params": {"bluff_freq": 0.5, "bluff_max_eq": 0.3, "flop_bluff_freq": 0.0}}
     acts_on = [P.postflop_action(obs, on, 1.0, rng=rng) for _ in range(200)]
     assert 0.3 < acts_on.count(Action.RAISE_HALF) / 200 < 0.7
     assert all(P.postflop_action(obs, off, 1.0, rng=rng) == Action.CHECK_CALL for _ in range(50))

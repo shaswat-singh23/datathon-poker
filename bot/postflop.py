@@ -63,13 +63,15 @@ PARAMS: dict = {
     "raise_pot_eq": 0.82,      # raise pot at or above this equity
     "reraise_step": 0.06,      # each raise already made this street adds this to raise/bet thresholds
     # checked to us / first to act
-    "bet_half_eq": 0.44,       # bet half pot at or above this equity (#39: 0.62 -> 0.44)
+    "bet_half_eq": 0.52,       # bet half pot at or above this equity (#39: 0.62 -> 0.52, bot/exploit.py's floor)
     "bet_pot_eq": 0.78,        # bet pot at or above this equity
-    "bluff_freq": 0.50,        # chance to bluff half pot when free and equity is low (#39: 0.10 -> 0.50)
-    "bluff_max_eq": 0.40,      # only bluff with equity below this (#39: 0.20 -> 0.40)
-    "bluff_min_board": 3,      # bluff once the board has this many cards (#39: 3 = flop too; was turn/river only)
+    "bluff_freq": 0.10,        # turn/river: chance to bluff half pot when free and equity is low
+    "bluff_max_eq": 0.35,      # only bluff with equity below this (#39: 0.20 -> 0.35, bot/exploit.py's cap)
+    # flop bluffs / stabs (#39), separate from the turn/river bluff_freq that bot/exploit.py tunes
+    "flop_bluff_freq": 0.70,   # chance to bet half pot on the flop when checked to and equity is low
+    "flop_bluff_max_eq": 0.50, # only with equity below this (bet_half_eq covers 0.52+)
     # postflop line discounts (subtracted from Monte Carlo equity before deciding)
-    "bet_discount": 0.15,      # per opponent postflop bet/raise this hand (#39)
+    "bet_discount": 0.20,      # per opponent postflop bet/raise this hand (#39)
     "street_discount": 0.0,    # extra per opponent bet/raise on the current street
     "call_discount": 0.0,      # per opponent postflop call of our bet this hand
     # the discounts shrink against habitual bettors (measured postflop aggression,
@@ -252,8 +254,11 @@ def decide(eq, obs, p=PARAMS, rng=None) -> Action:
             return _pick((Action.RAISE_POT, Action.RAISE_HALF), legal)
         if eq >= p["bet_half_eq"] + step:
             return _pick((Action.RAISE_HALF, Action.RAISE_POT), legal)
-        if (p["bluff_freq"] > 0 and eq < p["bluff_max_eq"] and len(obs.board) >= p["bluff_min_board"]
-                and (rng if rng is not None else random.Random(_seed(obs))).random() < p["bluff_freq"]):
+        flop = len(obs.board) == 3
+        freq = p["flop_bluff_freq"] if flop else p["bluff_freq"]
+        max_eq = p["flop_bluff_max_eq"] if flop else p["bluff_max_eq"]
+        if (freq > 0 and eq < max_eq
+                and (rng if rng is not None else random.Random(_seed(obs))).random() < freq):
             return _pick((Action.RAISE_HALF, Action.CHECK_CALL), legal)
         return _pick((Action.CHECK_CALL,), legal)
     pot_odds = to_call / float(max(1, int(obs.pot)) + to_call)
