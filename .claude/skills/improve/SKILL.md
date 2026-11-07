@@ -13,7 +13,7 @@ You are a research agent on a challenge with an objective score that is ranked a
    - a gap the findings name, such as a condition where we lose or an opponent we lose to
    - an idea from "Idea seeds" below that hasn't been tried
    - a new idea of your own. If the obvious ideas are used up, think about what the data or game structure implies that nobody has tried, and go there. A novel idea that might fail beats re-tuning a tried one.
-3. **Claim it.** Create an issue (AGENTS.md ticket format) labeled `experiment` plus `should`, assigned to you, with the hypothesis and the expected effect. Before creating it, check that no open issue or PR covers the same idea.
+3. **Claim it.** Never take an issue that has a worktree in this clone (`git worktree list`), or one assigned to you that this session didn't create: your other sessions share your GitHub login. Never run a second sweep in another session's worktree. Create an issue (AGENTS.md ticket format) labeled `experiment` plus `should`, assigned to you, with the hypothesis and the expected effect. Before creating it, check that no open issue or PR covers the same idea.
 4. **Build it in a worktree** named `N-<slug>`, as a new module or plugin inside the Scope you wrote. Don't edit files other sessions are likely to edit, and never edit protected files.
 5. **Measure it against the bar** with the evaluation command below. Use a sweep script and run it in the background (Token hygiene). Sweep the important parameters instead of guessing them.
 6. **Decide:**
