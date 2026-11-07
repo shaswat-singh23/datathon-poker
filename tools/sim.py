@@ -165,6 +165,11 @@ class SimStats(je.AgentStats):
     decisions: int = 0                 # choose_action requests actually sent
     decision_seconds: float = 0.0      # wall time of those requests (incl. on_hand_end)
     max_call_seconds: float = 0.0      # slowest single request (any kind)
+    # CPU time (time.thread_time) of the same work: unlike wall time it does not
+    # grow when the OS pauses the process on a loaded box.
+    cpu_seconds: float = 0.0           # CPU time of all requests
+    decision_cpu_seconds: float = 0.0  # CPU time of choose_action requests
+    max_cpu_call_seconds: float = 0.0  # most CPU-hungry single request
     load_seconds: float = 0.0          # module import time (startup, not charged)
 
     def to_dict(self, include_timing: bool = True) -> dict[str, Any]:
@@ -173,6 +178,8 @@ class SimStats(je.AgentStats):
         if include_timing:
             d["decision_seconds"] = round(self.decision_seconds, 6)
             d["max_call_seconds"] = round(self.max_call_seconds, 6)
+            d["cpu_seconds"] = round(self.cpu_seconds, 6)
+            d["max_cpu_call_seconds"] = round(self.max_cpu_call_seconds, 6)
             d["load_seconds"] = round(self.load_seconds, 6)
         return d
 
@@ -226,6 +233,7 @@ class InProcessAgent:
         crash: Optional[str] = None
         value = None
         start = time.perf_counter()
+        cpu_start = time.thread_time()     # nested inside the wall clock reads
         for raw in results:
             try:
                 self.module.on_hand_end(HandResult.from_dict(raw), self.memory)
@@ -235,6 +243,7 @@ class InProcessAgent:
             value = fn()
         except Exception as exc:
             crash = _error_info(exc)
+        cpu = time.thread_time() - cpu_start         # CPU time of that code
         compute = time.perf_counter() - start        # the bot's own code
         elapsed = compute + self.overhead              # what the judge would measure
 
@@ -244,9 +253,12 @@ class InProcessAgent:
         st.time_seconds += max(0.0, charged - self.grace)
         st.calls += 1
         st.max_call_seconds = max(st.max_call_seconds, compute)
+        st.cpu_seconds += cpu
+        st.max_cpu_call_seconds = max(st.max_cpu_call_seconds, cpu)
         if is_decision:
             st.decisions += 1
             st.decision_seconds += compute
+            st.decision_cpu_seconds += cpu
 
         if elapsed > timeout:  # the judge would have given up on this request
             if limited_by_bank:
@@ -337,6 +349,9 @@ def _timing(s: SimStats) -> dict[str, Any]:
         "decisions": s.decisions,
         "mean_decision_ms": round(1000 * s.decision_seconds / s.decisions, 4) if s.decisions else 0.0,
         "max_call_ms": round(1000 * s.max_call_seconds, 3),
+        "cpu_s": round(s.cpu_seconds, 4),
+        "mean_cpu_decision_ms": round(1000 * s.decision_cpu_seconds / s.decisions, 4) if s.decisions else 0.0,
+        "max_cpu_call_ms": round(1000 * s.max_cpu_call_seconds, 3),
         "load_s": round(s.load_seconds, 3),
         "skipped_calls": s.skipped_calls,
     }
@@ -454,15 +469,21 @@ def timing_summary(matches: list[dict[str, Any]], side: str) -> dict[str, Any]:
     halves = [h for m in matches if "crash" not in m for h in m["timing"][side]]
     dec = sum(h["decisions"] for h in halves)
     tot_ms = sum(h["mean_decision_ms"] * h["decisions"] for h in halves)
+    tot_cpu_ms = sum(h.get("mean_cpu_decision_ms", 0.0) * h["decisions"] for h in halves)
     return {
         "mean_decision_ms": tot_ms / dec if dec else 0.0,
         "max_call_ms": max((h["max_call_ms"] for h in halves), default=0.0),
+        "mean_cpu_decision_ms": tot_cpu_ms / dec if dec else 0.0,
+        "max_cpu_call_ms": max((h.get("max_cpu_call_ms", 0.0) for h in halves), default=0.0),
         "max_half_think_s": max((h["think_s"] for h in halves), default=0.0),
         "max_half_compute_s": max((h["wall_s"] for h in halves), default=0.0),
         "errors": sum(e for m in matches if "crash" not in m for e in m["errors"][side]),
         "forfeits": sum(f for m in matches if "crash" not in m for f in m["forfeited"][side]),
         "timeouts": sum(f for m in matches if "crash" not in m for f in m["timed_out"][side]),
     }
+
+
+CPU_BUG_MS = 100.0
 
 
 def _flags(t: dict[str, Any]) -> str:
@@ -475,6 +496,10 @@ def _flags(t: dict[str, Any]) -> str:
         out.append(f"OVER {ACTION_TIMEOUT_SECONDS:g}s/DECISION")
     elif t["max_call_ms"] > 750 * ACTION_TIMEOUT_SECONDS:
         out.append("near 1s/decision")
+    # AGENTS.md: any decision over 100 ms is a bug. Judged on CPU time, so a
+    # wall-time spike from machine load does not trip it.
+    if t.get("max_cpu_call_ms", 0.0) > CPU_BUG_MS:
+        out.append(f"cpu max > {CPU_BUG_MS:g} ms")
     if t["errors"]:
         out.append(f"{t['errors']} ERRORS")
     if t["forfeits"]:
@@ -485,8 +510,9 @@ def _flags(t: dict[str, Any]) -> str:
 
 
 def _timing_line(label: str, t: dict[str, Any]) -> str:
-    return (f"  {label:<26} mean {t['mean_decision_ms']:7.3f} ms/dec | max call "
-            f"{t['max_call_ms']:7.1f} ms | max half think {t['max_half_think_s']:5.2f} s "
+    return (f"  {label:<26} wall mean/max {t['mean_decision_ms']:.3f} / {t['max_call_ms']:.1f} ms | "
+            f"cpu mean/max {t.get('mean_cpu_decision_ms', 0.0):.3f} / "
+            f"{t.get('max_cpu_call_ms', 0.0):.1f} ms | max half think {t['max_half_think_s']:5.2f} s "
             f"(raw {t['max_half_compute_s']:5.2f} s) | "
             f"{_flags(t)}")
 
