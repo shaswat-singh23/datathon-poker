@@ -11,13 +11,22 @@ preflop_percentile(hole)        -> float  0..1 fraction of starting hands with p
 equity(hole, board, ...)        -> float  Monte Carlo equity (win + 0.5 tie) vs a range-narrowed opponent
 equity_se(hole, board, ...)     -> (float, float)  same, plus the standard error of the estimate
 hand_features(hole, board)      -> dict   cheap descriptive features
-calibrate(...)                  -> dict   re-measure sample throughput on this machine (optional)
+calibrate(...)                  -> dict   re-measure the base cost model on this machine (optional)
+
+Time budget: without `n_samples`, equity() plans a sample count from a per-street
+cost model scaled by a slowdown factor measured on this machine (a few-ms probe at
+import, then a moving average of every call's measured time), draws it in batches,
+and stops early if the clock says the next batch would end past ~1.15x the budget.
+So a call takes about 0.75-1x time_budget_ms on any CPU.  At least _MIN_SAMPLES
+samples are always drawn.
 
 Randomness: `rng` may be a numpy Generator, a `random.Random`, an int seed, or None.
-With a Generator / Random / int and a fixed `n_samples` (or the default
-time_budget_ms, which maps to a deterministic sample count unless calibrate() is
-called) the result is fully reproducible. A `random.Random` is consumed for one
-64-bit seed per call.
+With a Generator / Random / int and a fixed `n_samples` the result is fully
+reproducible.  A budgeted call is reproducible while the machine's speed is steady
+(the planned count only changes when the slowdown factor drifts >30%, and never
+between two back-to-back queries of the same spot); if the machine slows down
+mid-call it returns fewer samples.  A `random.Random` is consumed for one 64-bit
+seed per call.
 
 How it is fast
 --------------
@@ -282,6 +291,29 @@ _MIN_SAMPLES = 64
 _MAX_SAMPLES = 200_000
 _DEFAULT_RNG = np.random.default_rng()
 
+# Budgeted sampling.  The sample count for a budget is planned from _COST scaled by a
+# per-street slowdown factor _SLOW[street] = (measured time) / (_COST prediction) on
+# this machine.  _SLOW is set at import by a few-ms probe and then follows _SLOW_EMA
+# (a slow moving average of the measured ratio after every call), but only jumps when
+# the average drifts more than _HYST away, so on a steady machine the planned count,
+# and hence the result for a given rng, stays the same from call to call.  A jump is
+# applied only when the queried spot changes, so asking about the same spot twice in
+# a row (same cards, range and budget) always plans the same count.  Samples
+# are drawn in batches of at most _MAX_BATCH_US, and if the clock says the next batch
+# would end past _HARD * budget the call stops early (machine suddenly slower).
+# Worst steady state: _SLOW_EMA = _HYST * _SLOW -> calls take _TARGET * _HYST ~ 0.975x the budget.
+_SLOW = {0: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+_SLOW_EMA = dict(_SLOW)
+_SLOW_MIN, _SLOW_MAX = 0.25, 50.0
+_SLOW_ALPHA = 0.05
+_HYST = 1.3              # re-plan when the average moves more than 30% from _SLOW
+_TARGET = 0.75           # plan to finish at this fraction of the budget
+_HARD = 1.15             # never start a batch predicted to end past this fraction
+_MAX_BATCH_US = 4000.0   # one batch's predicted cost cap
+_BATCH_OVH_US = 25.0     # extra overhead per additional batch (dev laptop)
+_OBSERVE_MIN_US = 400.0  # only calls predicted at least this long update _SLOW_EMA
+_LAST_SPOT = None
+
 
 def _to_generator(rng) -> np.random.Generator:
     if rng is None:
@@ -296,9 +328,61 @@ def _to_generator(rng) -> np.random.Generator:
 
 
 def _n_for_budget(street: int, budget_ms: float) -> int:
+    """Sample count the cost model predicts fits in budget_ms on this machine."""
     fixed, per = _COST[street]
-    n = int((budget_ms * 1000.0 - fixed) / per)
+    n = int((budget_ms * 1000.0 / _SLOW[street] - fixed) / per)
     return max(_MIN_SAMPLES, min(_MAX_SAMPLES, n))
+
+
+def _set_slow(street: int, ratio: float) -> None:
+    r = min(_SLOW_MAX, max(_SLOW_MIN, ratio))
+    _SLOW[street] = _SLOW_EMA[street] = r
+
+
+def _observe_slow(street: int, ratio: float) -> None:
+    """Fold one call's measured/predicted time ratio into the street's slowdown factor."""
+    ema = _SLOW_EMA[street]
+    ratio = min(2.0 * ema, max(0.5 * ema, ratio))  # one preempted call moves it little
+    ema = (1.0 - _SLOW_ALPHA) * ema + _SLOW_ALPHA * ratio
+    ema = min(_SLOW_MAX, max(_SLOW_MIN, ema))
+    _SLOW_EMA[street] = ema
+
+
+def _replan(street: int, spot) -> None:
+    """Move _SLOW[street] to the average if it drifted out of band and the spot changed."""
+    global _LAST_SPOT
+    if spot == _LAST_SPOT:
+        return
+    _LAST_SPOT = spot
+    ema = _SLOW_EMA[street]
+    if not (1.0 / _HYST <= ema / _SLOW[street] <= _HYST):
+        _SLOW[street] = ema
+
+
+def _sample_budget(draw, street: int, budget_ms: float, t0: float) -> np.ndarray:
+    """Draw the planned number of samples for budget_ms in batches, stopping early if
+    the clock says the next batch would end well past the budget."""
+    fixed, per = _COST[street]
+    slow = _SLOW[street]
+    n_plan = _n_for_budget(street, _TARGET * budget_ms)
+    per_batch = max(_MIN_SAMPLES, int((_MAX_BATCH_US / slow - _BATCH_OVH_US) / per))
+    k = -(-n_plan // per_batch)
+    size = -(-n_plan // k)
+    hard = t0 + _HARD * budget_ms / 1000.0
+    batch_s = slow * (_BATCH_OVH_US + per * size) / 1e6
+    chunks = []
+    got = 0
+    while got < n_plan:
+        if got >= _MIN_SAMPLES and time.perf_counter() + batch_s > hard:
+            break
+        m = min(size, n_plan - got)
+        chunks.append(draw(m))
+        got += m
+    elapsed_us = (time.perf_counter() - t0) * 1e6
+    pred_us = fixed + per * got + _BATCH_OVH_US * (len(chunks) - 1)
+    if pred_us >= _OBSERVE_MIN_US:  # tiny calls measure Python overhead, not throughput
+        _observe_slow(street, elapsed_us / pred_us)
+    return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
 
 
 def _range_start(opp_min_pct: float) -> int:
@@ -375,6 +459,7 @@ def _validate(hole: Sequence[int], board: Sequence[int]) -> None:
 def equity_se(hole: Sequence[int], board: Sequence[int], *, opp_min_pct: float = 0.0,
               n_samples: int | None = None, time_budget_ms: float = 1.0, rng=None) -> tuple[float, float]:
     """Like equity() but returns (equity, standard_error). SE is 0.0 for pure table lookups."""
+    t0 = time.perf_counter()
     if not _LOADED:
         raise RuntimeError(f"equity tables missing: run tools/build_tables.py (expected {_DATA_PATH})")
     _validate(hole, board)
@@ -384,9 +469,13 @@ def equity_se(hole: Sequence[int], board: Sequence[int], *, opp_min_pct: float =
         eq = _CLASS_EQ[cid]
         return eq, math.sqrt(eq * (1.0 - eq) / max(1, int(_CLASS_N[cid])))
     g = _to_generator(rng)
-    n = int(n_samples) if n_samples is not None else _n_for_budget(nb, time_budget_ms)
-    n = max(1, n)
-    w = _equity_samples(hole, board, opp_min_pct, n, g)
+    draw = _make_sampler(hole, board, opp_min_pct, g)
+    if n_samples is not None:
+        w = draw(max(1, int(n_samples)))
+    else:
+        _replan(nb, (tuple(hole), tuple(board), opp_min_pct, time_budget_ms))
+        w = _sample_budget(draw, nb, float(time_budget_ms), t0)
+    n = w.size
     mean = float(w.mean())
     se = float(w.std() / math.sqrt(n)) if n > 1 else 0.5
     return mean, se
@@ -398,8 +487,8 @@ def equity(hole: Sequence[int], board: Sequence[int], *, opp_min_pct: float = 0.
     preflop_percentile >= opp_min_pct (no card collisions); the board (0, 3, 4 or 5
     cards) is completed at random.
 
-    n_samples: exact number of (opponent, runout) samples; if None it is derived
-    from time_budget_ms with a fixed cost model (deterministic for a given rng).
+    n_samples: exact number of (opponent, runout) samples; if None, samples are
+    drawn in batches until about time_budget_ms has elapsed (at least _MIN_SAMPLES).
     Board = 0 with opp_min_pct = 0 returns preflop_equity(hole).
     """
     return equity_se(hole, board, opp_min_pct=opp_min_pct, n_samples=n_samples,
@@ -407,6 +496,11 @@ def equity(hole: Sequence[int], board: Sequence[int], *, opp_min_pct: float = 0.
 
 
 def _equity_samples(hole, board, opp_min_pct, n, g) -> np.ndarray:
+    return _make_sampler(hole, board, opp_min_pct, g)(n)
+
+
+def _make_sampler(hole, board, opp_min_pct, g):
+    """Do the per-spot setup once; return draw(n) -> (n,) array of win (1/0.5/0) samples."""
     nb = len(board)
     known = 0
     for c in hole:
@@ -414,7 +508,6 @@ def _equity_samples(hole, board, opp_min_pct, n, g) -> np.ndarray:
     for c in board:
         known |= 1 << c
     start = _range_start(opp_min_pct)
-    opp = _sample_opps(g, n, known, start)
     hole_a = np.asarray(hole, dtype=np.intp)
     hpv = PV[hole_a[_PI] * 36 + hole_a[_PJ]]  # (10,)
 
@@ -423,8 +516,12 @@ def _equity_samples(hole, board, opp_min_pct, n, g) -> np.ndarray:
         tv = TV[(b[_TA] * 36 + b[_TB]) * 36 + b[_TC]]  # (10,)
         hero = int(_T[hpv[:, None] + tv[None, :]].max())
         pt = _T[PV[:, None] + tv[None, :]].max(axis=1)  # (1296,)
-        opp_s = pt[_HPAIR[opp]].max(axis=1)
-        return (opp_s < hero) + 0.5 * (opp_s == hero)
+
+        def draw_river(n):
+            opp = _sample_opps(g, n, known, start)
+            opp_s = pt[_HPAIR[opp]].max(axis=1)
+            return (opp_s < hero) + 0.5 * (opp_s == hero)
+        return draw_river
 
     if nb == 4:
         live = np.array([c for c in range(NUM_CARDS) if not (known >> c) & 1], dtype=np.intp)
@@ -441,38 +538,48 @@ def _equity_samples(hole, board, opp_min_pct, n, g) -> np.ndarray:
         pt = np.zeros((R, 1296), dtype=_T.dtype)
         pt[:, keys] = vals
         pt = pt.ravel()
-        omask = _HMASK[opp]
-        ri = g.integers(0, R, size=n)
-        for _ in range(100):
-            bad = ((omask >> live[ri].astype(np.uint64)) & np.uint64(1)).astype(bool)
-            nbad = int(bad.sum())
-            if nbad == 0:
-                break
-            ri[bad] = g.integers(0, R, size=nbad)
-        opp_s = pt[ri[:, None] * 1296 + _HPAIR[opp]].max(axis=1)
-        h = hero[ri]
-        return (opp_s < h) + 0.5 * (opp_s == h)
+        live_u = live.astype(np.uint64)
+
+        def draw_turn(n):
+            opp = _sample_opps(g, n, known, start)
+            omask = _HMASK[opp]
+            ri = g.integers(0, R, size=n)
+            for _ in range(100):
+                bad = ((omask >> live_u[ri]) & np.uint64(1)).astype(bool)
+                nbad = int(bad.sum())
+                if nbad == 0:
+                    break
+                ri[bad] = g.integers(0, R, size=nbad)
+            opp_s = pt[ri[:, None] * 1296 + _HPAIR[opp]].max(axis=1)
+            h = hero[ri]
+            return (opp_s < h) + 0.5 * (opp_s == h)
+        return draw_turn
 
     # flop (2-card runout) or preflop with a range (5-card runout): direct scoring
     k = 5 - nb
-    excl = _HMASK[opp] | np.uint64(known)
-    run = _sample_runouts(g, excl, k, bin(known).count("1") + 5)
-    boards = np.empty((n, 5), dtype=np.intp)
-    if nb:
-        boards[:, :nb] = np.asarray(board, dtype=np.intp)
-    boards[:, nb:] = run
-    tv = TV[(boards[:, _TA] * 36 + boards[:, _TB]) * 36 + boards[:, _TC]]  # (n,10)
-    hero = _T[hpv[None, :, None] + tv[:, None, :]].reshape(n, -1).max(axis=1)
-    ov = _HPV[opp]
-    opp_s = _T[ov[:, :, None] + tv[:, None, :]].reshape(n, -1).max(axis=1)
-    return (opp_s < hero) + 0.5 * (opp_s == hero)
+    known_count = bin(known).count("1") + 5
+    board_a = np.asarray(board, dtype=np.intp)
+
+    def draw_direct(n):
+        opp = _sample_opps(g, n, known, start)
+        excl = _HMASK[opp] | np.uint64(known)
+        run = _sample_runouts(g, excl, k, known_count)
+        boards = np.empty((n, 5), dtype=np.intp)
+        if nb:
+            boards[:, :nb] = board_a
+        boards[:, nb:] = run
+        tv = TV[(boards[:, _TA] * 36 + boards[:, _TB]) * 36 + boards[:, _TC]]  # (n,10)
+        hero = _T[hpv[None, :, None] + tv[:, None, :]].reshape(n, -1).max(axis=1)
+        ov = _HPV[opp]
+        opp_s = _T[ov[:, :, None] + tv[:, None, :]].reshape(n, -1).max(axis=1)
+        return (opp_s < hero) + 0.5 * (opp_s == hero)
+    return draw_direct
 
 
 def calibrate(repeats: int = 7, seed: int = 0) -> dict:
-    """Re-measure the per-street cost model on this machine (takes ~0.3 s).
-
-    Afterwards the default sample counts adapt to the machine (still deterministic
-    for a given rng within a process). Returns the new {street: (fixed_us, per_sample_us)}.
+    """Re-measure the per-street cost model on this machine (takes ~0.3 s) and reset
+    the slowdown factors to 1.  Optional: budgeted calls already adapt via _SLOW.
+    Returns the new {street: (fixed_us, per_sample_us)}.
     """
     g = np.random.default_rng(seed)
     spots = {0: 0, 3: 3, 4: 4, 5: 5}
@@ -491,7 +598,35 @@ def calibrate(repeats: int = 7, seed: int = 0) -> dict:
         per = max(0.01, (times[3000] - times[300]) / 2700.0)
         fixed = max(0.0, times[300] - 300 * per)
         _COST[street] = (fixed * 1.1, per * 1.1)
+    for street in _SLOW:
+        _set_slow(street, 1.0)
     return dict(_COST)
+
+
+def _quick_slowdown(seed: int = 0) -> None:
+    """Import-time estimate of _SLOW per street: median of 3 small timed calls each
+    (~0.3-0.5 ms per call on the dev laptop, a few ms in total)."""
+    if not _LOADED:
+        return
+    g = np.random.default_rng(seed)
+    hole = [0, 5, 10, 15, 20]
+    probes = {0: ([], 0.5, 600), 3: ([25, 30, 35], 0.0, 1000),
+              4: ([25, 30, 35, 1], 0.0, 2000), 5: ([25, 30, 35, 1, 6], 0.0, 3000)}
+    for street, (board, pct, n) in probes.items():
+        _make_sampler(hole, board, pct, g)(64)  # warm caches
+        times = []
+        for _ in range(3):
+            t0 = time.perf_counter()
+            _make_sampler(hole, board, pct, g)(n)
+            times.append((time.perf_counter() - t0) * 1e6)
+        fixed, per = _COST[street]
+        _set_slow(street, sorted(times)[1] / (fixed + per * n))
+
+
+try:
+    _quick_slowdown()
+except Exception:  # never let a timing probe break import
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +794,7 @@ def _bench() -> None:
             equity_se(d[:5], d[5:], opp_min_pct=pct, rng=g)
             tmax = max(tmax, time.perf_counter() - t1)
         print(f"equity board={nb} opp_min_pct={pct}: {dt:.3f} ms/call (max {tmax * 1e3:.2f}), "
-              f"n={_n_for_budget(nb, 1.0)}, mean SE {np.mean(ses):.4f}, max SE {np.max(ses):.4f}")
+              f"slow={_SLOW[nb]:.2f}, mean SE {np.mean(ses):.4f}, max SE {np.max(ses):.4f}")
         if nb >= 3:
             t0 = time.perf_counter()
             for d in spots:
