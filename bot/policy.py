@@ -1,46 +1,60 @@
-"""bot/policy.py - the strategy. agent.py wraps these three functions with
-crash/illegal-action/time-bank protection, so this file can focus on poker.
+"""bot/policy.py - glue between agent.py's shell and the strategy modules.
 
-Placeholder heuristic until the equity-engine strategy lands.
+Each decision:
+    1. the opponent model sees the observation      (bot/opponent_model.py)
+    2. preflop:  bot.preflop, given our hand's preflop percentile (bot.equity)
+       postflop: bot.timing grants a Monte Carlo budget, bot.postflop decides
+Each hand end: the opponent model sees the result.
+
+agent.py catches anything raised here and replaces illegal actions, so this
+file stays plain. The opponent model is optional: until bot/opponent_model.py
+exists (#4), or after it raises once, play continues without it. Its expected
+interface (from #4): OpponentModel() kept in memory["opp_model"], with
+observe_action(obs) and observe_result(result). Using its stats to adjust
+play is #12.
 """
-from evaluator import card_rank, card_suit, category_of, omaha_score
-from game import Action, Street
+from game import Street
+
+from bot import equity, postflop, preflop, timing
+
+try:
+    from bot import opponent_model as _om
+except Exception:  # missing (#4 not merged) or broken: play without it
+    _om = None
+
+
+def _disable_model(memory, where, exc):
+    memory["opp_model"] = None
+    memory["opp_model_error"] = f"{where}: {type(exc).__name__}: {exc}"
+
+
+def _observe(memory, method, arg):
+    model = memory.get("opp_model")
+    if model is None:
+        return
+    try:
+        getattr(model, method)(arg)
+    except Exception as exc:
+        _disable_model(memory, method, exc)
 
 
 def new_half(config, memory):
     memory["hands"] = 0
-
-
-def _preflop_score(hole):
-    ranks = sorted((card_rank(c) for c in hole), reverse=True)
-    suits = [card_suit(c) for c in hole]
-    score = sum(ranks) / 40.0
-    if len(set(ranks)) < 5:
-        score += 0.15
-    if max(suits.count(s) for s in set(suits)) >= 2:
-        score += 0.1
-    return score
+    memory["opp_model"] = None
+    if _om is not None:
+        try:
+            memory["opp_model"] = _om.OpponentModel()
+        except Exception as exc:
+            _disable_model(memory, "OpponentModel()", exc)
 
 
 def choose_action(obs, memory):
-    legal = obs.legal_actions
+    _observe(memory, "observe_action", obs)
     if obs.street == Street.PREFLOP:
-        s = _preflop_score(obs.hole_cards)
-        if s > 1.0 and Action.RAISE_POT in legal and obs.raises_this_street < 2:
-            return Action.RAISE_POT
-        if s > 0.75 or obs.to_call == 0:
-            return Action.CHECK_CALL
-        return Action.FOLD if obs.to_call > 1 else Action.CHECK_CALL
-    if len(obs.board) >= 3:
-        cat = category_of(omaha_score(obs.hole_cards, obs.board))
-        if cat >= 5 and Action.RAISE_POT in legal:
-            return Action.RAISE_POT
-        if cat >= 3 or obs.to_call == 0:
-            return Action.CHECK_CALL
-        if obs.to_call * 4 <= obs.pot and cat >= 1:
-            return Action.CHECK_CALL
-    return Action.FOLD if obs.to_call > 0 else Action.CHECK_CALL
+        return preflop.preflop_action(obs, memory, equity.preflop_percentile(obs.hole_cards))
+    return postflop.postflop_action(obs, memory, timing.budget_ms(memory, obs))
 
 
 def on_hand_end(result, memory):
-    memory["hands"] += 1
+    memory["hands"] = memory.get("hands", 0) + 1
+    _observe(memory, "observe_result", result)
