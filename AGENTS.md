@@ -78,6 +78,8 @@ Each issue has exactly one priority label: `must`, `should`, or `nice`. Add `bug
 - Only pick unassigned issues whose Depends on issues are all closed.
 - Claim it: `gh issue edit N --add-assignee @me`. Then check the assignees again. If someone else is on it too, unassign yourself and pick another.
 - One ticket per agent session. A person can run several sessions, each on its own ticket in its own worktree.
+- **Home repo first.** Run /work in the repo for the challenge you're on. Overflow to another repo only when yours has no unblocked `must` ticket, or when the HQ status issue (datathon-dashboard, label `status`) says another repo is starved or near a deadline. In another repo you build and open PRs; its decider merges anything that claims a result.
+- **Fan-out** (Claude Code, best on a large usage plan): `/fanout` claims several independent S or M tickets and runs each in its own background worktree subagent. One review of the list, several PRs.
 
 ## Working a task
 1. **Isolate.**
@@ -88,7 +90,7 @@ Each issue has exactly one priority label: `must`, `should`, or `nice`. Add `bug
 4. **Verify.** Check every Done-when item by actually running it. Don't assume.
 5. **Sync.** `git fetch origin && git rebase origin/master`, fix any conflicts, then verify again.
 6. **Open a PR.** Title `#N: <goal>`. The body has `Closes #N`, how each Done-when item was checked, and any number produced. Comment the PR link on the issue.
-7. **Merge.** If the ticket produced a result that will be claimed (a number, a score, a finding), someone other than the author reviews it before merge. Anything else, the author merges once checks pass. Agents never merge without a human saying so.
+7. **Merge.** A PR that produces a result that will be claimed (a number, a score, a finding) is merged by this repo's decider, after someone other than the author has reviewed it. The orchestrator's review comment counts as a first pass. Anything else, the author merges once checks pass. Agents never merge without a human saying so.
 8. **Blocked for more than 15 minutes?** Comment what's blocking on the issue, unassign yourself, and pick another.
 
 ## Avoiding merge conflicts
@@ -97,6 +99,15 @@ Each issue has exactly one priority label: `must`, `should`, or `nice`. Add `bug
 - PRs stay small and merge within about 2 hours of starting. Long-lived branches cause conflicts.
 - Dependency changes go in their own small PR, merged first. On a lockfile conflict, take master's lockfile and re-run the add command.
 - Results go in their own files in `findings/`, never one shared file.
+
+## Token hygiene
+Usage limits are per account, so wasted context is lost work. Every agent:
+- Sends long output to a log file and reads only what matters: `cmd > /tmp/<name>.log 2>&1; tail -n 40 /tmp/<name>.log`, or `grep` it. Never print a whole dataset, log, or JSON result into the conversation.
+- Runs anything that takes more than about 2 minutes (sweeps, multi-seed matches, builds) in the background with output to a log file, and checks the log instead of waiting.
+- Reads large files with line ranges or `grep`, and doesn't re-read a file it just wrote.
+- Writes one sweep script and lets the machine run every variant, instead of trying variants one at a time in conversation.
+- Keeps PR bodies and issue comments short: what changed, how it was checked, the number.
+- Starts each ticket in a fresh session (`/clear` or a new tab in Claude Code, `/new` in Codex).
 
 ## Rules
 1. Never edit or overwrite anything in data/raw.
