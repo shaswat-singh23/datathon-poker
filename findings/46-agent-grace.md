@@ -1,6 +1,6 @@
 # agent.py's time accounting now tracks the judge's charge (grace credited)
 - Issue: #46 | Author: Kyle (Claude Code) | Time: 16:22
-- Claim: agent.py's `memory["_spent"]` now runs **3-8% above** the judge-style charge over a 1000-deal match (it was 63-99% above at the 8 s bank and 4-7x at the 4 s bank), and never below it in any half measured. With that time handed to Monte Carlo, the field result goes **24.5 → 26.0 / 36 at `--time-bank 4`** (+2.968 → +3.268 bb/deal) and **26.0 → 26.5 / 36 at `--time-bank 8`** (+3.200 → +3.259 bb/deal), with 0 errors, 0 forfeits and 0 empty banks in 144 hero halves.
+- Claim: agent.py's `memory["_spent"]` now runs **3-8% above** the judge-style charge over a 1000-deal match (it was 63-99% above at the 8 s bank and 4-7x at the 4 s bank), and never below it in any half measured. With that time handed to Monte Carlo, the field result goes **24.5 → 26.0 / 36 at `--time-bank 4`** (+2.968 → +3.268 bb/deal) and **26.0 → 26.5 / 36 at `--time-bank 8`** (+3.200 → +3.259 bb/deal; 25.5 / +3.260 in a repeat on the rebased commit, i.e. unchanged within noise), with 0 errors, 0 forfeits and 0 empty banks in 144 hero halves.
 - Evidence: paired runs of master `3868baf` (exported with `git archive`) and this branch, one after the other on the same 10-core laptop, `--procs 3`. Commands and tables below.
 - So what: `bot/timing.py` budgets against agent.py's number, so the phantom ~1 ms per decision left a third of the real 8 s bank, and most of the 4 s test bank, unused. Now nearly the whole budgeted bank goes to equity estimates, and the 4 s test bank plays like the 8 s one (26.0 vs 26.5 points).
 - Checked by: unchecked
@@ -54,7 +54,17 @@ Max half think stays under the bank (2.91 of 4 s, 5.96 of 8 s; timing.py's desig
 
 **Decisions over 100 ms.** Wall-clock spikes appear in both runs at load 12-36: 8 hero halves over 100 ms on master at 8 s, 4 on the branch (3 of them the potodds seeds, which ran concurrently), 1 on master at 4 s, 0 on the branch at 4 s. The change does not raise any per-decision cap (timing.py's CEIL_MS is still 12 ms). A rerun of agent vs potodds (`tools/sim.py agent.py tools/opponents/potodds.py --seeds 3 --procs 3 --time-bank 8`) at load 9.6 → 8.7 gave max call **16.7 ms**, 0 errors, max half think 5.75 s. So these are OS pauses on a loaded box, not bot code.
 
+### Repeat on the rebased commit (master `bb7fb8f`, sim with CPU-time columns from #60)
+Master gained `bot/exploit.py` (not wired into `bot/policy.py` yet) and the sim's CPU-time columns; bot behaviour is unchanged. Same command, this branch only:
+
+| run | points | bb/deal | errors / forfeits / empty banks / skipped | max half think | max call wall / **CPU** | load (start → end) |
+|---|---|---|---|---|---|---|
+| branch, 4 s | 27.0 / 36 | +3.193 | 0 / 0 / 0 / 0 | 2.99 s | 193.8 / **13.2 ms** | 9.4 → 36.7 |
+| branch, 8 s | 25.5 / 36 | +3.260 | 0 / 0 / 0 / 0 | 5.89 s | 153.8 / **14.5 ms** | 36.7 → 10.6 |
+
+So the field result at 8 s is 25.5-26.5 for the branch vs 26.0 for master (same bb/deal, +3.26 vs +3.20): no change beyond noise at the real bank; at 4 s it is 26.0-27.0 vs 24.5. No decision used more than 14.5 ms of CPU; the 5 wall-clock spikes over 100 ms per run are OS pauses at load up to 57.
+
 ## Checks
-- `python -m pytest -q`: 141 passed.
-- `./tools/check_build.sh`: ALL CHECKS PASSED.
+- `python -m pytest -q`: 459 passed on the rebased commit (one run during a load-57 burst failed `test_postflop.py::test_huge_budget_is_capped_and_fast` on wall time, 150 ms; it passes on rerun and this branch does not touch postflop).
+- `./tools/check_build.sh`: ALL CHECKS PASSED on the rebased commit.
 - Rule 3: the gain is where the change says it should be (bots that the hero needs equity against, mostly at 4 s where the phantom charge was biggest), and the 8 s change is within noise. Nothing looks too good.
