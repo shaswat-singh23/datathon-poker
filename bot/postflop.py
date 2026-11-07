@@ -34,8 +34,9 @@ Monte Carlo call gets at most PARAMS["max_mc_ms"] (20 ms by default), so a
 generous caller cannot push a single decision anywhere near the 100 ms limit.
 
 Randomness: pass a random.Random as `rng` and the whole decision (Monte Carlo
-sampling and the bluff coin) is reproducible. With rng=None a module-level
-seeded random.Random is used, so replays are still deterministic.
+sampling and the bluff coin) follows it. With rng=None a per-decision seed is
+derived from the observation (hand index, cards, street, history length), so
+the same spot always gets the same action, whatever was decided before it.
 
 The returned action is always in obs.legal_actions (best legal fallback), and
 the function never raises: if equity fails or the budget is too small, it
@@ -80,7 +81,18 @@ PARAMS: dict = {
 _CAT_EQ = (0.25, 0.45, 0.60, 0.66, 0.70, 0.80, 0.85, 0.92, 0.97)
 
 _RAISES = (Action.RAISE_HALF, Action.RAISE_POT)
-_RNG = random.Random(20261107)  # seeded: decisions replay identically when rng=None
+
+
+def _seed(obs) -> int:
+    """Deterministic per-decision seed from the observation (used when rng=None)."""
+    try:
+        s = int(obs.hand_index) * 1_000_003
+        s += sum(int(c) << (3 * i) for i, c in enumerate(obs.hole_cards))
+        s += sum(int(c) << (3 * i + 1) for i, c in enumerate(obs.board)) * 7919
+        s += int(obs.street) * 104_729 + len(obs.action_history or ()) * 15_485_863
+        return s & 0xFFFFFFFF
+    except Exception:
+        return 0
 
 
 def _params(memory) -> dict:
@@ -158,9 +170,11 @@ def estimate_equity(obs, memory, budget_ms, p=PARAMS, rng=None) -> float:
     budget = mc_budget_ms(budget_ms, p)
     if budget <= 0.0 or len(board) < 3:
         return _fallback_equity(hole, board)
+    if rng is None:
+        rng = random.Random(_seed(obs))
     try:
         e = float(_eq.equity(hole, board, opp_min_pct=opp_min_pct(obs, memory, p),
-                             time_budget_ms=budget, rng=rng if rng is not None else _RNG))
+                             time_budget_ms=budget, rng=rng))
         if 0.0 <= e <= 1.0:
             return e
     except Exception:
@@ -170,6 +184,8 @@ def estimate_equity(obs, memory, budget_ms, p=PARAMS, rng=None) -> float:
 
 def decide(eq, obs, p=PARAMS, rng=None) -> Action:
     """Pure decision from an equity estimate (no Monte Carlo)."""
+    if rng is None:
+        rng = random.Random(_seed(obs))
     legal = tuple(obs.legal_actions)
     to_call = max(0, int(obs.to_call))
     step = p["reraise_step"] * max(0, int(obs.raises_this_street))
@@ -179,7 +195,7 @@ def decide(eq, obs, p=PARAMS, rng=None) -> Action:
         if eq >= p["bet_half_eq"] + step:
             return _pick((Action.RAISE_HALF, Action.RAISE_POT), legal)
         if (p["bluff_freq"] > 0 and eq < p["bluff_max_eq"] and len(obs.board) >= 4
-                and (rng or _RNG).random() < p["bluff_freq"]):
+                and rng.random() < p["bluff_freq"]):
             return _pick((Action.RAISE_HALF, Action.CHECK_CALL), legal)
         return _pick((Action.CHECK_CALL,), legal)
     pot_odds = to_call / float(max(1, int(obs.pot)) + to_call)
@@ -202,6 +218,8 @@ def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
         if not isinstance(memory, dict):
             memory = {}
         p = _params(memory)
+        if not isinstance(rng, random.Random):
+            rng = random.Random(_seed(obs) if rng is None else rng)
         a = decide(estimate_equity(obs, memory, budget_ms, p, rng), obs, p, rng)
         return a if a in legal else _pick((), legal)
     except Exception:

@@ -135,6 +135,9 @@ def test_decisions_are_reproducible_with_rng():
         a1 = P.postflop_action(obs, {}, 2.0, rng=random.Random(7))
         a2 = P.postflop_action(obs, {}, 2.0, rng=random.Random(7))
         assert a1 == a2
+        # and with no rng at all: the seed comes from the observation
+        assert P.postflop_action(obs, {}, 2.0) == P.postflop_action(obs, {}, 2.0)
+        assert P.estimate_equity(obs, {}, 2.0) == P.estimate_equity(obs, {}, 2.0)
 
 
 def test_never_raises_on_bad_inputs(monkeypatch):
