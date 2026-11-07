@@ -6,22 +6,37 @@ tracks what we have used in ``memory["_time_left"]`` (seconds; it already adds
 per-decision budget:
 
     from bot import timing                   # import runs calibrate() once (startup)
-    ms = timing.budget_ms(memory, obs)       # once per decision
+    ms = timing.budget_ms(memory, obs)       # once per decision that may sample
     n  = timing.samples_for(ms)              # optional: ms -> omaha_score calls
 
 Guarantees:
-    * A RESERVE_S slice of the bank (1.5 s) is never handed out, so at least
-      1 s is still unused at hand 1000 even if the estimates are off.
+    * A reserve slice of the bank (RESERVE_FRAC of it, 1.0 s of 8 s, never
+      under RESERVE_MIN_S) is never handed out, so time is still unused at
+      hand 1000 even if the estimates are off. agent.py's accounting is itself
+      pessimistic: it charges 0.5 ms per decision that the judge only charges
+      when the HTTP round trip exceeds its 1 ms grace.
     * An allowance for per-decision overhead (wrapper, JSON, non-MC policy
       code) is held back for every decision still to come, so Monte Carlo can
-      never starve the cheap decisions at the end of the half.
+      never starve the cheap decisions at the end of the half. The allowance
+      starts from a pessimistic prior and follows the measured overhead (up or
+      down, never below the wrapper's own charge) once 50 decisions are in.
     * Each budget is 0 (inside the reserve: play the cheap path) or lies in
-      [FLOOR_MS, CEIL_MS].
-    * Spending is spread evenly over the decisions expected to remain, and
-      weighted towards big pots and the flop/turn.
+      [FLOOR_MS, CEIL_MS]. FLOOR_MS is above the smallest budget bot/postflop
+      will sample with (min_budget_ms / budget_frac = 0.31 ms), so a non-zero
+      grant is never wasted.
+    * Spending is spread evenly over the decisions expected to *ask* for a
+      budget (policy.py only asks postflop), weighted towards big pots and the
+      flop/turn.
+    * Grants are in *cost* terms: the module learns how much the equity engine
+      really spends per granted ms (it overshoots small budgets, see #28) and
+      scales grants down by that ratio, so a grant of x ms costs about x ms.
+    * When the bank cannot cover a floor grant for every remaining ask, a share
+      of the asks (by pot weight) gets the floor and the rest get 0, instead
+      of everyone getting the floor and the end of the half getting nothing.
 
 Call budget_ms exactly once per decision that uses Monte Carlo: it records what
-it granted so it can measure the true overhead from memory["_spent"].
+it granted so it can measure the true overhead from memory["_spent"], and how
+often it is asked so it can spread the bank over the right count.
 """
 from __future__ import annotations
 
@@ -32,19 +47,28 @@ from evaluator import NUM_CARDS, omaha_score, warmup
 from game import NUM_DEALS, STARTING_STACK, TIME_BANK_SECONDS, Street
 
 # --- tunables ---------------------------------------------------------------
-RESERVE_S = 1.5            # never granted; keeps charged time <= 6.5 s of 8 s
-FLOOR_MS = 0.2             # smallest non-zero budget (less isn't worth sampling)
+RESERVE_FRAC = 0.125       # of the bank, never granted: 1.0 s of 8 s, 0.5 s of 4 s
+RESERVE_MIN_S = 0.5        # reserve never below this, whatever the bank
+FLOOR_MS = 0.4             # smallest non-zero budget (postflop samples from 0.31 ms)
 CEIL_MS = 40.0             # largest single budget (judge hard limit is 1000 ms)
 MAX_SHARE = 0.03           # one decision gets at most 3% of what is spendable
 
 WRAPPER_OVERHEAD_MS = 0.5  # agent.py charges this per decision on top of real time
 POLICY_OVERHEAD_MS = 0.15  # non-MC policy work per decision at reference speed
-OVERHEAD_MARGIN = 1.25     # safety factor on the overhead allowance
+OVERHEAD_MARGIN = 1.25     # safety factor on the overhead allowance (prior)
+MEASURED_MARGIN = 1.10     # safety factor once the overhead is measured
+MEASURE_AFTER = 50         # decisions before the measured overhead replaces the prior
 
 PRIOR_DECISIONS_PER_HAND = 2.5   # until we have observed enough hands
-MIN_OVERHEAD_DPH = 3.0           # overhead allowance never assumes fewer than this
+MIN_OVERHEAD_DPH = 2.0           # overhead allowance never assumes fewer than this
 WORST_DECISIONS_PER_HAND = 8     # exhaustive search of the game tree (non-button seat)
+PRIOR_ASKS_PER_HAND = 1.2        # budget_ms calls per hand until observed
+MIN_ASKS_PER_HAND = 0.5          # spreading never assumes fewer asks than this
 WARMUP_HANDS = 20                # hands before observed rates replace priors
+
+PRIOR_COST_RATIO = 1.5           # realized Monte Carlo ms per granted ms, until measured
+RATIO_MIN, RATIO_MAX = 0.5, 8.0  # bounds on one measurement of that ratio
+RATIO_ALPHA = 0.05               # EMA step for the ratio
 
 STREET_WEIGHT = {
     Street.PREFLOP: 0.25,  # mostly table lookups
@@ -108,9 +132,20 @@ except Exception:  # pragma: no cover - keep the reference speed
     _speed, _evals_per_ms = 1.0, REF_EVALS_PER_MS
 
 
+def reserve_s(bank: float) -> float:
+    """Seconds of the bank that are never granted."""
+    return max(RESERVE_MIN_S, RESERVE_FRAC * float(bank))
+
+
 def overhead_prior_ms() -> float:
     """Expected charged overhead per decision before any measurement."""
     return WRAPPER_OVERHEAD_MS + POLICY_OVERHEAD_MS * _speed
+
+
+def overhead_floor_ms() -> float:
+    """Measured overhead is never trusted below this (the wrapper's own charge
+    plus a sliver of policy work)."""
+    return WRAPPER_OVERHEAD_MS + 0.2 * POLICY_OVERHEAD_MS * _speed
 
 
 def _weight(obs) -> float:
@@ -121,6 +156,15 @@ def _weight(obs) -> float:
     return street_w * (0.6 + 1.2 * pot_frac)
 
 
+def _rate(count: float, hand: int, prior: float, floor: float, cap: float) -> float:
+    """Per-hand rate of `count` events over `hand` finished hands: the prior
+    until WARMUP_HANDS, never optimistic (below the prior) before that."""
+    if hand < 3 or count <= 0:
+        return prior
+    seen = min(cap, max(floor, count / hand))
+    return seen if hand >= WARMUP_HANDS else max(prior, seen)
+
+
 def budget_ms(memory: dict, obs) -> float:
     """Milliseconds of Monte Carlo this decision may use (0.0 = use the cheap path)."""
     bank = float(memory.get("_bank", TIME_BANK_SECONDS))
@@ -129,36 +173,58 @@ def budget_ms(memory: dict, obs) -> float:
     hand = max(0, int(getattr(obs, "hand_index", 0)))
     hands_left = max(1, num_hands - hand)          # includes this hand
     decisions = int(memory.get("_decisions", 0))   # finished decisions this half
-
-    # Decisions per hand: observed once we have enough hands; during warm-up the
-    # larger of the prior and what we have seen so far (never optimistic early).
-    dph = PRIOR_DECISIONS_PER_HAND
-    if hand >= 3 and decisions > 0:
-        seen = min(float(WORST_DECISIONS_PER_HAND), max(1.0, decisions / hand))
-        dph = seen if hand >= WARMUP_HANDS else max(dph, seen)
-    remaining = max(1.0, hands_left * dph)
-
-    # Overhead per decision: never below the prior, raised if measurement says so.
+    asks = int(memory.get("_tb_wn", 0))            # budget_ms calls so far this half
     granted = float(memory.get("_tb_granted_s", 0.0))
     spent = float(memory.get("_spent", bank - time_left))
-    over_ms = overhead_prior_ms()
-    if decisions >= 50:
-        over_ms = max(over_ms, (spent - granted) / decisions * 1000.0)
-    allowance_s = hands_left * max(dph, MIN_OVERHEAD_DPH) * over_ms * OVERHEAD_MARGIN / 1000.0
 
-    spendable_ms = (time_left - RESERVE_S - allowance_s) * 1000.0
-    if spendable_ms <= FLOOR_MS:
-        return 0.0
+    # Realized cost of Monte Carlo per granted ms (the engine overshoots small
+    # budgets): the previous grant's cost is what was spent since, minus the
+    # expected overhead of the decisions in between.
+    ratio = float(memory.get("_tb_ratio", PRIOR_COST_RATIO))
+    prev = memory.get("_tb_prev")
+    if prev is not None and prev[2] > 0.0:
+        n_dec = decisions - prev[1]
+        if n_dec >= 1:
+            mc_ms = (spent - prev[0]) * 1000.0 - n_dec * overhead_prior_ms()
+            sample = min(RATIO_MAX, max(RATIO_MIN, mc_ms / prev[2]))
+            ratio += RATIO_ALPHA * (sample - ratio)
+            memory["_tb_ratio"] = ratio
+
+    # Decisions per hand (all of them: they each cost overhead) and budget
+    # requests per hand (the ones that share the spendable time).
+    dph = _rate(decisions, hand, PRIOR_DECISIONS_PER_HAND, 1.0, WORST_DECISIONS_PER_HAND)
+    aph = _rate(asks, hand, PRIOR_ASKS_PER_HAND, MIN_ASKS_PER_HAND, WORST_DECISIONS_PER_HAND)
+    remaining = max(1.0, hands_left * aph)
+
+    # Overhead per decision: the prior until measured, then what memory says
+    # once the Monte Carlo cost is taken out, never below the wrapper's charge.
+    over_ms, margin = overhead_prior_ms(), OVERHEAD_MARGIN
+    if decisions >= MEASURE_AFTER:
+        over_ms = max(overhead_floor_ms(), (spent - ratio * granted) / decisions * 1000.0)
+        margin = MEASURED_MARGIN
+    allowance_s = hands_left * max(dph, MIN_OVERHEAD_DPH) * over_ms * margin / 1000.0
 
     # Spread evenly: weight / (mean weight) gets this decision's share.
     w = _weight(obs)
     wsum = float(memory.get("_tb_wsum", 0.0)) + w
-    wn = int(memory.get("_tb_wn", 0)) + 1
+    wn = asks + 1
     memory["_tb_wsum"], memory["_tb_wn"] = wsum, wn
     mean_w = wsum / wn if wn >= 30 else 1.0
-    ms = spendable_ms / remaining * (w / mean_w)
 
-    ms = min(ms, CEIL_MS, spendable_ms * MAX_SHARE)
-    ms = max(ms, FLOOR_MS)
-    memory["_tb_granted_s"] = granted + ms / 1000.0
+    spendable_ms = (time_left - reserve_s(bank) - allowance_s) * 1000.0
+    ms = 0.0
+    if spendable_ms > FLOOR_MS * ratio:
+        cost = spendable_ms / remaining * (w / mean_w)      # ms this decision may cost
+        ms = min(CEIL_MS, min(cost, CEIL_MS, spendable_ms * MAX_SHARE) / ratio)
+        if ms < FLOOR_MS:
+            # Not enough for everyone: give a floor grant to a share of the asks
+            # proportional to their claim, so the bank goes to the big pots and
+            # is never overspent and then starved.
+            rng = memory.get("_tb_rng")
+            if rng is None:
+                rng = memory["_tb_rng"] = random.Random(0x35)
+            ms = FLOOR_MS if rng.random() < ms / FLOOR_MS else 0.0
+    memory["_tb_prev"] = (spent, decisions, ms)
+    if ms > 0.0:
+        memory["_tb_granted_s"] = granted + ms / 1000.0
     return ms
