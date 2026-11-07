@@ -9,7 +9,11 @@
       "Bash(gh issue list *)", "Bash(gh issue view *)", "Bash(gh issue create *)",
       "Bash(gh issue edit *)", "Bash(gh issue comment *)",
       "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr list *)", "Bash(gh pr diff *)", "Bash(gh pr checks *)",
-      "Bash(mkdir *)"
+      "Bash(mkdir *)",
+      "Bash(uv venv *)", "Bash(uv pip install *)",
+      "Bash(.venv/bin/python *)", "Bash(python -m pytest *)", "Bash(.venv/bin/python -m pytest *)",
+      "Bash(python tools/sim.py *)", "Bash(.venv/bin/python tools/sim.py *)",
+      "Bash(./tools/check_build.sh)"
     ],
     "deny": [
       "Edit(/data/raw/**)", "Read(./.env)", "Read(./.env.*)",

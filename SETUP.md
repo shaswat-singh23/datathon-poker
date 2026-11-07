@@ -54,4 +54,17 @@ git push -u origin HEAD                                              # share, th
 Conflict? Ask your agent to resolve it, or ask the decider. Never force-push.
 
 ## Stack setup
-Filled in at kickoff.
+Python 3.12 (the tournament image's version). Dependencies live in the organizers' `requirements.txt` (what the tournament builds) and `requirements-dev.txt` (adds pytest/httpx). No pyproject: a second dependency source would drift from the real build.
+```bash
+echo "DATA_DIR=./data" > .env                 # optional: no secrets in this challenge, DATA_DIR is where sim logs go
+uv venv --python 3.12 .venv                   # or: python3.12 -m venv .venv
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+.venv/bin/python -m pytest -q                 # proof: all tests pass
+```
+Useful commands:
+```bash
+.venv/bin/python tools/sim.py --hero agent.py --field tools/opponents/*.py baseline-bots/*.py --seeds 3 --procs 8
+.venv/bin/python tools/sim.py agent.py tools/opponents/tag.py --deals 1000 --seeds 5 --procs 5
+./tools/check_build.sh                        # tournament-identical Docker build + smoke test (needs Docker running)
+```
+If `check_build.sh` fails with `docker-credential-desktop not found`, run `export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"` first (macOS Docker Desktop).

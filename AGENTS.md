@@ -10,24 +10,41 @@ All work is a GitHub issue. Agents do the building; humans decide what gets buil
 - **Story:** everyone presents. Story work is `must` tickets with deadlines (created at kickoff). The decider makes sure they land on time.
 
 ## Challenge
-Filled in at kickoff. The decider updates the headline at each sync.
-- Challenge: ___
-- Deliverables: ___
-- Judging weights: ___
-- Core question: ___
+The decider updates the headline at each sync.
+- Challenge: TAMU Datathon heads-up poker bot. Heads-up **Short Deck (36 cards, 6–A) 5-card Pot-Limit Omaha**: exactly 2 hole + 3 board cards; flush beats full house, trips beat straight; A-6-7-8-9 is the low straight. Blinds 1/2, 80-chip stacks reset every hand, 4 actions only (FOLD, CHECK_CALL, RAISE_HALF, RAISE_POT), raise cap 4 per street. Full rules: STARTER_README.md.
+- Deliverables: public GitHub repo URL + full 40-char commit SHA + team name, submitted via the organizers' form. `agent.py` and `requirements.txt` must stay at the repo root. `./tools/check_build.sh` must pass on the exact commit submitted.
+- Judging weights: round robin vs other teams' bots. Each match = duplicate format, 1000 deals × 2 halves (seats swapped, same cards). Win (1 pt) if the 95% CI of bb/deal is above 0, loss (0) if below, chop (0.5) otherwise. Ties on points broken by avg bb/deal. **Any forfeit (5 errors in a half) = match loss regardless of chips.**
+- Core question: what strategy wins the most matches against a field of unknown student bots while never erroring and never running out of time (8 s bank per 1000-hand half, 1 s max per decision)?
 - Headline result: ___
 
 ## Stack
-Filled in at kickoff.
+Python 3.12 (tournament image version). Dependencies in the organizers' `requirements.txt` (what the tournament installs; numpy and torch-CPU are already in the base image) and `requirements-dev.txt` (pytest). No pyproject/lockfile on purpose: `requirements.txt` is the single source the Docker build reads. Setup commands: SETUP.md "Stack setup".
 
 ## Layout
-Filled in at kickoff. Defaults that hold for any challenge:
 ```
-data/raw/     original data exactly as downloaded. NEVER modify. gitignored.
-findings/     one file per result. See "Findings" below.
-.env          secrets and local paths (DATA_DIR). gitignored. Copied into Claude worktrees by .worktreeinclude.
+agent.py              tournament entry point. A crash-proof SHELL only: catches policy exceptions,
+                      replaces illegal actions, tracks the time bank in memory["_time_left"].
+                      No strategy goes here. Keep the SERVER PLUMBING section untouched.
+bot/                  our strategy package, one module per concern (one ticket per module):
+  policy.py           glue: new_half / choose_action / on_hand_end call the modules below
+  equity.py, data/    hand-equity engine (preflop table, fast Monte Carlo)
+  preflop.py          preflop ranges            postflop.py        postflop decisions
+  opponent_model.py   opponent tendencies       timing.py          per-decision time budget
+tools/sim.py          duplicate-match simulator (reuses judge_engine's loop and verdict), multi-seed, parallel
+tools/opponents/      sparring bots = our stand-in tournament field
+tests/                our pytest files. The organizers' test_agent.py stays at the root and must keep passing.
+baseline-bots/, game.py, evaluator.py, judge_engine.py, docker/, tools/check_build.sh, tools/smoke_test.py
+                      organizers' files. Don't edit them (edits have no effect on the real judge anyway).
+findings/             one file per result. See "Findings" below.
+.env                  local paths (DATA_DIR). gitignored. Copied into Claude worktrees by .worktreeinclude.
 ```
-Code reads data from the `DATA_DIR` environment variable (default `./data`), so every worktree uses the same data without copying it.
+`DATA_DIR` (default `./data`) is where match logs and sim JSON go. There is no dataset in this challenge.
+
+## Challenge-specific rules
+- **Baseline and measurement.** The baseline is the field: `baseline-bots/*.py` plus `tools/opponents/*.py`. A strategy claim is a table from `tools/sim.py --hero agent.py --field tools/opponents/*.py baseline-bots/*.py --seeds 3` (3 seeds × 1000 deals, duplicate format) saved in `findings/`. Report points and bb/deal ± CI, not chips.
+- **Time.** Test with `--time-bank 4` (half the real bank) so a slower tournament CPU can't empty it. Any single decision over 100 ms in the sim is a bug.
+- **Errors.** `agent.py` must stay a shell around `bot/policy.py`. Strategy code may raise; the shell catches it. Never remove that protection. `python -m pytest -q` and `./tools/check_build.sh` must pass before anything merges to master.
+- **Both halves are fresh processes.** Nothing carries over between halves except what you learn inside a half. Keep all per-half state in `memory`.
 
 ## Ticket format
 Every issue body has these five headings, in this order. The GitHub issue form produces them. Agents creating issues with `gh issue create` write them by hand.
