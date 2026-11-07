@@ -14,3 +14,21 @@
 1. On a machine with Docker, check out the SHA you'll submit and run `./tools/check_build.sh`. It must print `ALL CHECKS PASSED`.
 2. Submit team name **The Conductors**, the repo URL above, and that full 40-char SHA.
 3. If any later commit is submitted instead, record it here (or in a new findings file) with its check_build result.
+
+## check_build results (#50)
+- Issue: #50 | Author: Kyle (Claude Code) | Time: 16:57 CST, 2026-11-07
+- Machine: Kyle's Mac, Docker Desktop, arm64 build (not `PLATFORM=linux/amd64`). Each run used the exact committed tree (`git archive <sha> | tar -x`), so uncommitted files could not leak in. Mac note: `PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH" ./tools/check_build.sh` (Docker's credential helper).
+
+| SHA | what | check_build | smoke test |
+|---|---|---|---|
+| `7a63b825a8d3637ed2e91b070e783d77ee676367` | #14 candidate | **ALL CHECKS PASSED** | GET / in 1.3 s, "The Conductors / ShortDeckShark", every /act legal in 1–9 ms, +1 MB over base |
+| `b9fa456a73f0d95f8deb521fc1543254aa2b44be` | master at 16:57 CST (includes #48 timing, #54 equity tail fix) | **ALL CHECKS PASSED** | GET / in 0.8 s, every /act legal in 1–3 ms, +1 MB over base |
+
+Full output tails are on issue #50. Recommendation: submit `b9fa456a73f0d95f8deb521fc1543254aa2b44be` unless master moves again before the form goes in; any newer SHA needs its own row here first.
+
+## Form submission log
+Fill in when the organizers' form is submitted (team **The Conductors**, repo https://github.com/shaswat-singh23/datathon-poker, full 40-char SHA). One row per submission or resubmission; a SHA goes here only after it has a PASSED row above.
+
+| submitted (Central) | by | SHA | check_build row above |
+|---|---|---|---|
+| _not yet submitted_ | | | |
