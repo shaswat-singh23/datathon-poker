@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(git add *)", "Bash(git commit *)", "Bash(git switch *)", "Bash(git checkout *)",
+      "Bash(git branch *)", "Bash(git fetch *)", "Bash(git pull *)", "Bash(git rebase origin/master)",
+      "Bash(git rebase --continue)", "Bash(git merge *)", "Bash(git stash *)", "Bash(git worktree *)",
+      "Bash(git push -u origin *)", "Bash(git push origin *)",
+      "Bash(gh issue list *)", "Bash(gh issue view *)", "Bash(gh issue create *)",
+      "Bash(gh issue edit *)", "Bash(gh issue comment *)",
+      "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr list *)", "Bash(gh pr diff *)", "Bash(gh pr checks *)",
+      "Bash(mkdir *)"
+    ],
+    "deny": [
+      "Edit(/data/raw/**)", "Read(./.env)", "Read(./.env.*)",
+      "Bash(git push --force *)", "Bash(git push -f *)", "Bash(git push *--force*)", "Bash(git push * -f *)",
+      "Bash(git reset --hard *)", "Bash(gh issue delete *)", "Bash(gh repo delete *)", "Bash(rm -rf *)"
+    ]
+  }
+}

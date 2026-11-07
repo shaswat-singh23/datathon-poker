@@ -1,0 +1,27 @@
+# data stays local, shared via Drive
+/data/
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# environments and caches (any stack)
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/
+.ipynb_checkpoints/
+
+# personal scratch
+scratch/
+
+# Claude Code worktrees and personal settings
+.claude/worktrees/
+.claude/settings.local.json
+CLAUDE.local.md
+
+# os / editor
+.DS_Store
+Thumbs.db

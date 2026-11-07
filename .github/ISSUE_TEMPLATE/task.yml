@@ -1,0 +1,45 @@
+name: Task
+description: A unit of work a person or agent can pick up. Format is defined in AGENTS.md.
+labels: ["nice"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome in 1 or 2 sentences, not the steps.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Checkable criteria. Each one should be something you can run or see.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Files or folders this ticket may create or change. Everything else is off limits.
+    validations:
+      required: true
+  - type: input
+    id: depends
+    attributes:
+      label: Depends on
+      description: Issues that must close first, like "#3, #5", or "none".
+      value: none
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: Bigger than L? Split it into several tickets.
+      options:
+        - S (under 30 min)
+        - M (under 1 hour)
+        - L (under 2 hours)
+    validations:
+      required: true
