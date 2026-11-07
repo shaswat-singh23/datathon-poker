@@ -39,8 +39,10 @@ bb/deal    the cell's contribution to overall bb/deal (cell total / all deals),
 Which tables sum: the rows of every table (street reached, position, preflop pct,
 each "<street> 1st act" table, and the opponent table's "share of total" column)
 sum to the overall bb/deal, the judged number. In a "<street> 1st act" table the
-"-" row holds hands where the hero did not act on that street (the hand ended
-earlier, a walk, or an all-in run-out), so every hand appears exactly once.
+"(no act)" row holds hands that reached that street but where the hero never
+acted on it (a walk, the opponent folding first, or an all-in run-out), and the
+"(not reached)" row holds hands that ended before that street, so every hand
+appears exactly once.
 The opponent table's "bb/deal" column is bb/deal against that opponent (its total
 / that opponent's deals), matching sim.py's per-opponent number; those rows do not
 sum to the overall number.
@@ -122,6 +124,10 @@ def _hero_side(match: dict[str, Any], hero: Optional[str]) -> Optional[str]:
     return None
 
 
+NO_ACT = "(no act)"  # hand reached the street, hero never acted on it
+NOT_REACHED = "(not reached)"  # hand ended before the street
+
+
 def iter_hands(match: dict[str, Any], side: str) -> Iterator[dict[str, Any]]:
     """Yield one summary dict per hand, from the hero's point of view."""
     logs = match.get("logs") or {}
@@ -141,13 +147,17 @@ def iter_hands(match: dict[str, Any], side: str) -> Iterator[dict[str, Any]]:
             for a in acts:
                 if a["seat"] == seat and a["street"] not in first:
                     first[a["street"]] = _action_label(a)
+            last_act = first.get(reached, "-")
+            for s in STREETS:  # every street gets a row label, so each 1st-act table sums
+                if s not in first:
+                    first[s] = NO_ACT if STREETS.index(s) <= STREETS.index(reached) else NOT_REACHED
             pct = _percentile(h["hole_cards"][seat])
             yield {
                 "street": reached,
                 "pos": "BTN" if h["button_seat"] == seat else "BB",
                 "bucket": _bucket(pct),
                 "first": first,
-                "last_act": first.get(reached, "-"),
+                "last_act": last_act,
                 "showdown": bool(h.get("went_to_showdown")),
                 "bb": h["nets"][seat] / BIG_BLIND,
                 "opp": opp,
@@ -192,8 +202,12 @@ def _table(title: str, cells: dict[str, Cell], deals: int, order: Optional[list[
 def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> int:
     all_matches = data.get("matches", [])
     matches = [m for m in all_matches if "crash" not in m]
-    if len(matches) < len(all_matches):
-        print(f"warning: skipping {len(all_matches) - len(matches)} crashed match(es); "
+    crashed = [m for m in all_matches if "crash" in m]
+    if crashed:
+        names = "; ".join(f"{os.path.basename(str(m.get('bot_a', '?')))} vs "
+                          f"{os.path.basename(str(m.get('bot_b', '?')))} seed {m.get('seed', '?')}"
+                          for m in crashed)
+        print(f"warning: skipping {len(crashed)} crashed match(es) ({names}); "
               "overall bb/deal may differ from sim's", file=sys.stderr)
     if hero is None:  # default "bot A" only makes sense when every match has the same bot A
         heroes = sorted({str(m.get("bot_a", "")) for m in matches})
@@ -235,8 +249,8 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
             by_pos[h["pos"]].add(bb)
             by_bucket[h["bucket"]].add(bb)
             by_opp[h["opp"]].add(bb)
-            for s in STREETS:  # '-' = hero did not act on s, so each table sums
-                by_first[s][h["first"].get(s, "-")].add(bb)
+            for s in STREETS:  # every hand lands in one row: an action, NO_ACT or NOT_REACHED
+                by_first[s][h["first"][s]].add(bb)
             by_sit[(h["street"], h["pos"], h["bucket"], h["last_act"])].add(bb)
 
     if not used:
@@ -264,7 +278,7 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
         _table("opponent", by_opp, deals,
                sorted(by_opp, key=lambda k: by_opp[k].bb), own_deals=opp_deals)
     for s in STREETS:
-        if set(by_first[s]) - {"-"}:  # '-' = hero did not act on that street
+        if set(by_first[s]) - {NO_ACT, NOT_REACHED}:  # print only if the hero acted there
             _table(f"{s.lower()} 1st act", by_first[s], deals,
                    sorted(by_first[s], key=lambda k: by_first[s][k].bb))
 
