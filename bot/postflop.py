@@ -34,6 +34,12 @@ Optional memory keys (never required, safe defaults):
                                frequency (e.g. from bot/opponent_model.py).
                                Default PARAMS["default_aggression"].
     memory["postflop_params"]  dict of PARAMS overrides (merged over PARAMS).
+Written here: memory["_pf_aggr"], this half's count of the opponent's postflop
+bets and actions (observe_aggression).
+
+Line discounts (#39): Monte Carlo equity minus line_discount() is what gets
+compared with the thresholds. Each opponent postflop bet/raise this hand costs
+bet_discount, scaled down to 0 against opponents who bet habitually.
 
 Thresholds live in PARAMS so tuning tickets (#12) can adjust them.
 
@@ -53,14 +59,27 @@ from bot import equity as _eq
 PARAMS: dict = {
     # facing a bet
     "call_margin": 0.03,       # call if equity >= pot_odds + call_margin
-    "raise_half_eq": 0.72,     # raise half pot at or above this equity
+    "raise_half_eq": 0.66,     # raise half pot at or above this equity (#39: 0.72 -> 0.66)
     "raise_pot_eq": 0.82,      # raise pot at or above this equity
     "reraise_step": 0.06,      # each raise already made this street adds this to raise/bet thresholds
     # checked to us / first to act
-    "bet_half_eq": 0.62,       # bet half pot at or above this equity
+    "bet_half_eq": 0.52,       # bet half pot at or above this equity (#39: 0.62 -> 0.52, bot/exploit.py's floor)
     "bet_pot_eq": 0.78,        # bet pot at or above this equity
-    "bluff_freq": 0.10,        # chance to bluff half pot when free and equity is low (turn/river only)
-    "bluff_max_eq": 0.20,      # only bluff with equity below this
+    "bluff_freq": 0.10,        # turn/river: chance to bluff half pot when free and equity is low
+    "bluff_max_eq": 0.35,      # only bluff with equity below this (#39: 0.20 -> 0.35, bot/exploit.py's cap)
+    # flop bluffs / stabs (#39), separate from the turn/river bluff_freq that bot/exploit.py tunes
+    "flop_bluff_freq": 0.70,   # chance to bet half pot on the flop when checked to and equity is low
+    "flop_bluff_max_eq": 0.50, # only with equity below this (bet_half_eq covers 0.52+)
+    # postflop line discounts (subtracted from Monte Carlo equity before deciding)
+    "bet_discount": 0.20,      # per opponent postflop bet/raise this hand (#39)
+    "street_discount": 0.0,    # extra per opponent bet/raise on the current street
+    "call_discount": 0.0,      # per opponent postflop call of our bet this hand
+    # the discounts shrink against habitual bettors (measured postflop aggression,
+    # opponent bets+raises / postflop actions): full at <= disc_aggr_lo, none at >= disc_aggr_hi
+    "disc_aggr_lo": 0.25,      # tag / exploiter / nit measure 0.10-0.15
+    "disc_aggr_hi": 0.55,      # always_half / always_pot / maniac 0.9+, random 0.57, lag 0.45
+    "aggr_prior": 0.30,        # prior aggression ...
+    "aggr_prior_n": 10.0,      # ... worth this many opponent actions
     # range narrowing
     "pct_per_pre_raise": 0.10,   # opp_min_pct added per opponent preflop raise
     "pct_per_post_raise": 0.15,  # opp_min_pct added per opponent postflop bet/raise
@@ -167,6 +186,64 @@ def estimate_equity(obs, memory, budget_ms, p=PARAMS, rng=None) -> float:
     return _fallback_equity(hole, board)
 
 
+def observe_aggression(obs, memory, p=PARAMS) -> float:
+    """Update and return the opponent's postflop aggression for this half.
+
+    Aggression = opponent postflop bets+raises / opponent postflop actions,
+    smoothed by a prior of aggr_prior over aggr_prior_n actions. Counts each
+    action once: memory["_pf_aggr"] = [bets, actions, hand_index, seen], where
+    `seen` is how much of this hand's action_history is already counted.
+    Opponent postflop bets always get a reply from us, so they are all seen.
+    """
+    st = memory.get("_pf_aggr")
+    if not (isinstance(st, list) and len(st) == 4):
+        st = [0.0, 0.0, None, 0]
+        memory["_pf_aggr"] = st
+    hist = tuple(obs.action_history or ())
+    if st[2] != obs.hand_index:
+        st[2], st[3] = obs.hand_index, 0
+    for h in hist[st[3]:]:
+        if not h.is_me and int(h.street) != 0:
+            st[1] += 1
+            if h.action in _RAISES:
+                st[0] += 1
+    st[3] = len(hist)
+    n0 = float(p["aggr_prior_n"])
+    return (st[0] + p["aggr_prior"] * n0) / (st[1] + n0) if st[1] + n0 > 0 else float(p["aggr_prior"])
+
+
+def discount_scale(aggr, p=PARAMS) -> float:
+    """1 against opponents who rarely bet (their bets mean strength), falling
+    linearly to 0 against habitual bettors (their bets mean little)."""
+    lo, hi = float(p["disc_aggr_lo"]), float(p["disc_aggr_hi"])
+    if hi <= lo:
+        return 1.0 if aggr <= lo else 0.0
+    return min(1.0, max(0.0, (hi - aggr) / (hi - lo)))
+
+
+def line_discount(obs, p=PARAMS, scale=1.0) -> float:
+    """Equity to subtract for the opponent's postflop line in this hand.
+
+    The Monte Carlo range only knows preflop strength. An opponent who bets or
+    raises after the flop (or calls our bet) holds a hand that is strong on
+    *this* board, so our equity against its real range is lower than the
+    engine says. `scale` (discount_scale) shrinks it for habitual bettors.
+    """
+    bets = street_bets = calls = 0
+    cur = int(obs.street)
+    for h in obs.action_history or ():
+        st = int(h.street)
+        if h.is_me or st == 0:
+            continue
+        if h.action in _RAISES:
+            bets += 1
+            if st == cur:
+                street_bets += 1
+        elif h.action == Action.CHECK_CALL and h.amount > 0:
+            calls += 1
+    return scale * (bets * p["bet_discount"] + street_bets * p["street_discount"] + calls * p["call_discount"])
+
+
 def decide(eq, obs, p=PARAMS, rng=None) -> Action:
     """Pure decision from an equity estimate (no Monte Carlo)."""
     legal = tuple(obs.legal_actions)
@@ -177,8 +254,11 @@ def decide(eq, obs, p=PARAMS, rng=None) -> Action:
             return _pick((Action.RAISE_POT, Action.RAISE_HALF), legal)
         if eq >= p["bet_half_eq"] + step:
             return _pick((Action.RAISE_HALF, Action.RAISE_POT), legal)
-        if (p["bluff_freq"] > 0 and eq < p["bluff_max_eq"] and len(obs.board) >= 4
-                and (rng if rng is not None else random.Random(_seed(obs))).random() < p["bluff_freq"]):
+        flop = len(obs.board) == 3
+        freq = p["flop_bluff_freq"] if flop else p["bluff_freq"]
+        max_eq = p["flop_bluff_max_eq"] if flop else p["bluff_max_eq"]
+        if (freq > 0 and eq < max_eq
+                and (rng if rng is not None else random.Random(_seed(obs))).random() < freq):
             return _pick((Action.RAISE_HALF, Action.CHECK_CALL), legal)
         return _pick((Action.CHECK_CALL,), legal)
     pot_odds = to_call / float(max(1, int(obs.pot)) + to_call)
@@ -207,7 +287,9 @@ def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
             rng = random.Random(rng)
         elif not callable(getattr(rng, "random", None)):
             rng = random.Random(_seed(obs))
-        a = decide(estimate_equity(obs, memory, budget_ms, p, rng), obs, p, rng)
+        scale = discount_scale(observe_aggression(obs, memory, p), p)
+        eq = estimate_equity(obs, memory, budget_ms, p, rng) - line_discount(obs, p, scale)
+        a = decide(eq, obs, p, rng)
         return a if a in legal else _pick((), legal)
     except Exception:
         return _pick((Action.CHECK_CALL, Action.FOLD), legal)
