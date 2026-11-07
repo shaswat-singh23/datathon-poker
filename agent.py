@@ -81,6 +81,15 @@ def new_half(config: AgentConfig, memory: dict) -> None:
     """Called at the start of each half-match (1000 hands). memory is fresh."""
     bank = float(getattr(config, "time_bank_seconds", 8.0) or 8.0)
     memory["_bank"] = bank
+    # Hands in this half (1000 in the tournament, fewer in short sim runs) so
+    # bot/timing.py spreads the bank over the right count. If the value is
+    # missing or bad, leave it unset: timing.py then assumes game.NUM_DEALS.
+    try:
+        num_hands = int(getattr(config, "num_hands", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        num_hands = 0
+    if num_hands > 0:
+        memory["_num_hands"] = num_hands
     memory["_spent"] = 0.0
     memory["_time_left"] = bank
     memory["_decisions"] = 0

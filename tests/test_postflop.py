@@ -97,49 +97,6 @@ def test_property_facing_a_bet_is_legal_and_sane():
     assert seen == 120
 
 
-def test_category_fallback_follows_short_deck_ranking():
-    import evaluator as ev
-    assert list(P._CAT_EQ) == sorted(P._CAT_EQ), "fallback equity must rise with category"
-    assert P._CAT_EQ[ev.THREE_OF_A_KIND] > P._CAT_EQ[ev.STRAIGHT]
-    assert P._CAT_EQ[ev.FLUSH] > P._CAT_EQ[ev.FULL_HOUSE]
-    assert len(P._CAT_EQ) == len(ev.CATEGORY_NAMES)
-
-
-def test_monte_carlo_budget_is_capped():
-    cap = P.PARAMS["max_mc_ms"]
-    assert P.mc_budget_ms(1.0) == pytest.approx(P.PARAMS["budget_frac"])
-    for huge in (50.0, 500.0, 1e6):
-        assert P.mc_budget_ms(huge) == cap
-    assert P.mc_budget_ms(0.0) == 0.0 and P.mc_budget_ms("x") == 0.0
-    assert P.mc_budget_ms(float("nan")) == 0.0
-    # a generous caller cannot make one decision slow: wall time well under 100 ms
-    import time
-    rng = random.Random(12)
-    worst = 0.0
-    for _ in range(20):
-        obs = _random_postflop_obs(rng)
-        t0 = time.perf_counter()
-        P.postflop_action(obs, {}, 1000.0, rng=rng)
-        worst = max(worst, (time.perf_counter() - t0) * 1000)
-    assert worst < 100.0, f"max decision {worst:.1f} ms at a 1000 ms budget"
-
-
-def test_decisions_are_reproducible_with_rng():
-    """Same seed, same spot -> same equity estimate and same action (real Monte Carlo)."""
-    rng = random.Random(13)
-    for _ in range(5):
-        obs = _random_postflop_obs(rng, facing_bet=True)
-        e1 = P.estimate_equity(obs, {}, 2.0, rng=random.Random(99))
-        e2 = P.estimate_equity(obs, {}, 2.0, rng=random.Random(99))
-        assert e1 == e2
-        a1 = P.postflop_action(obs, {}, 2.0, rng=random.Random(7))
-        a2 = P.postflop_action(obs, {}, 2.0, rng=random.Random(7))
-        assert a1 == a2
-        # and with no rng at all: the seed comes from the observation
-        assert P.postflop_action(obs, {}, 2.0) == P.postflop_action(obs, {}, 2.0)
-        assert P.estimate_equity(obs, {}, 2.0) == P.estimate_equity(obs, {}, 2.0)
-
-
 def test_never_raises_on_bad_inputs(monkeypatch):
     rng = random.Random(2)
     obs = _random_postflop_obs(rng)
@@ -168,8 +125,8 @@ def test_equity_called_within_budget(monkeypatch):
         calls.clear()
         P.postflop_action(_random_postflop_obs(rng), {}, budget, rng=rng)
         assert len(calls) <= 1
-        assert all(b is not None and b <= min(budget, P.PARAMS["max_mc_ms"]) for b in calls), (budget, calls)
-        if P.mc_budget_ms(budget) > 0:
+        assert all(b is not None and b <= budget for b in calls), (budget, calls)
+        if budget * P.PARAMS["budget_frac"] >= P.PARAMS["min_budget_ms"]:
             assert len(calls) == 1
 
 
@@ -262,3 +219,62 @@ def test_monte_carlo_sanity():
                 to_call=20, pot=60, raises_this_street=1, action_history=())
     assert P.postflop_action(dataclasses.replace(base, hole_cards=tuple(nuts)), {}, 1.0) == Action.RAISE_POT
     assert P.postflop_action(dataclasses.replace(base, hole_cards=tuple(air)), {}, 1.0) == Action.FOLD
+
+
+def test_cat_eq_monotone_in_evaluator_order():
+    import evaluator as EV
+    order = (EV.HIGH_CARD, EV.ONE_PAIR, EV.TWO_PAIR, EV.STRAIGHT, EV.THREE_OF_A_KIND,
+             EV.FULL_HOUSE, EV.FLUSH, EV.FOUR_OF_A_KIND, EV.STRAIGHT_FLUSH)
+    assert all(P._CAT_EQ[a] < P._CAT_EQ[b] for a, b in zip(order, order[1:]))
+
+
+def test_deterministic_same_inputs_same_decision():
+    rng = random.Random(10)
+    for _ in range(40):
+        obs = _random_postflop_obs(rng)
+        for budget in (0.1, 1.0, 5.0):
+            # no rng: per-decision seed derived from the observation
+            assert P.postflop_action(obs, {}, budget) == P.postflop_action(obs, {}, budget)
+            assert P.estimate_equity(obs, {}, budget) == P.estimate_equity(obs, {}, budget)
+            # same caller seed twice -> same equity and action
+            e1 = P.estimate_equity(obs, {}, budget, rng=random.Random(42))
+            e2 = P.estimate_equity(obs, {}, budget, rng=random.Random(42))
+            assert e1 == e2
+            assert (P.postflop_action(obs, {}, budget, rng=random.Random(42))
+                    == P.postflop_action(obs, {}, budget, rng=random.Random(42)))
+
+
+def test_rng_passed_to_equity(monkeypatch):
+    seen = []
+    real = E.equity
+
+    def spy(*a, **k):
+        seen.append(k.get("rng"))
+        return real(*a, **k)
+    monkeypatch.setattr(E, "equity", spy)
+    obs = _random_postflop_obs(random.Random(11))
+    r = random.Random(5)
+    P.postflop_action(obs, {}, 1.0, rng=r)
+    P.postflop_action(obs, {}, 1.0)
+    assert seen[0] is r and seen[1] is not None
+
+
+def test_huge_budget_is_capped_and_fast(monkeypatch):
+    import time
+    calls = []
+    real = E.equity
+
+    def spy(*a, **k):
+        calls.append(k.get("time_budget_ms"))
+        return real(*a, **k)
+    monkeypatch.setattr(E, "equity", spy)
+    rng = random.Random(12)
+    worst = 0.0
+    for _ in range(30):
+        obs = _random_postflop_obs(rng)
+        t0 = time.perf_counter()
+        a = P.postflop_action(obs, {}, 5000.0, rng=rng)
+        worst = max(worst, (time.perf_counter() - t0) * 1000.0)
+        assert a in obs.legal_actions
+    assert calls and max(calls) <= P.PARAMS["max_equity_ms"]
+    assert worst < 100.0, worst
