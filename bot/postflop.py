@@ -61,6 +61,11 @@ PARAMS: dict = {
     "bet_pot_eq": 0.78,        # bet pot at or above this equity
     "bluff_freq": 0.10,        # chance to bluff half pot when free and equity is low (turn/river only)
     "bluff_max_eq": 0.20,      # only bluff with equity below this
+    "bluff_min_board": 4,      # bluff only once the board has this many cards (3 = flop too)
+    # postflop line discounts (subtracted from Monte Carlo equity before deciding)
+    "bet_discount": 0.0,       # per opponent postflop bet/raise this hand
+    "street_discount": 0.0,    # extra per opponent bet/raise on the current street
+    "call_discount": 0.0,      # per opponent postflop call of our bet this hand
     # range narrowing
     "pct_per_pre_raise": 0.10,   # opp_min_pct added per opponent preflop raise
     "pct_per_post_raise": 0.15,  # opp_min_pct added per opponent postflop bet/raise
@@ -167,6 +172,29 @@ def estimate_equity(obs, memory, budget_ms, p=PARAMS, rng=None) -> float:
     return _fallback_equity(hole, board)
 
 
+def line_discount(obs, p=PARAMS) -> float:
+    """Equity to subtract for the opponent's postflop line in this hand.
+
+    The Monte Carlo range only knows preflop strength. An opponent who bets or
+    raises after the flop (or calls our bet) holds a hand that is strong on
+    *this* board, so our equity against its real range is lower than the
+    engine says.
+    """
+    bets = street_bets = calls = 0
+    cur = int(obs.street)
+    for h in obs.action_history or ():
+        st = int(h.street)
+        if h.is_me or st == 0:
+            continue
+        if h.action in _RAISES:
+            bets += 1
+            if st == cur:
+                street_bets += 1
+        elif h.action == Action.CHECK_CALL and h.amount > 0:
+            calls += 1
+    return bets * p["bet_discount"] + street_bets * p["street_discount"] + calls * p["call_discount"]
+
+
 def decide(eq, obs, p=PARAMS, rng=None) -> Action:
     """Pure decision from an equity estimate (no Monte Carlo)."""
     legal = tuple(obs.legal_actions)
@@ -177,7 +205,7 @@ def decide(eq, obs, p=PARAMS, rng=None) -> Action:
             return _pick((Action.RAISE_POT, Action.RAISE_HALF), legal)
         if eq >= p["bet_half_eq"] + step:
             return _pick((Action.RAISE_HALF, Action.RAISE_POT), legal)
-        if (p["bluff_freq"] > 0 and eq < p["bluff_max_eq"] and len(obs.board) >= 4
+        if (p["bluff_freq"] > 0 and eq < p["bluff_max_eq"] and len(obs.board) >= p["bluff_min_board"]
                 and (rng if rng is not None else random.Random(_seed(obs))).random() < p["bluff_freq"]):
             return _pick((Action.RAISE_HALF, Action.CHECK_CALL), legal)
         return _pick((Action.CHECK_CALL,), legal)
@@ -207,7 +235,8 @@ def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
             rng = random.Random(rng)
         elif not callable(getattr(rng, "random", None)):
             rng = random.Random(_seed(obs))
-        a = decide(estimate_equity(obs, memory, budget_ms, p, rng), obs, p, rng)
+        eq = estimate_equity(obs, memory, budget_ms, p, rng) - line_discount(obs, p)
+        a = decide(eq, obs, p, rng)
         return a if a in legal else _pick((), legal)
     except Exception:
         return _pick((Action.CHECK_CALL, Action.FOLD), legal)
