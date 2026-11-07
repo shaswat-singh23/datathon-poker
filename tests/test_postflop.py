@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot import equity as E  # noqa: E402
 from bot import postflop as P  # noqa: E402
-from game import Action, Deal, Game, Street  # noqa: E402
+from game import Action, Deal, Game, ObservedAction, Street  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not E.tables_loaded(), reason="run tools/build_tables.py first")
 
@@ -57,6 +57,9 @@ def _random_postflop_obs(rng: random.Random, facing_bet: bool = False):
 
 
 def _obs(rng, **kw):
+    """Random postflop observation with fields replaced. The action history is
+    cleared unless given, so line_discount() is 0 and thresholds apply as-is."""
+    kw.setdefault("action_history", ())
     return dataclasses.replace(_random_postflop_obs(rng), **kw)
 
 
@@ -189,6 +192,54 @@ def test_bluff_frequency(no_mc):
     frac = acts.count(Action.RAISE_HALF) / len(acts)
     assert 0.4 < frac < 0.6
     assert set(acts) <= {Action.CHECK_CALL, Action.RAISE_HALF}
+
+
+def _hist(*acts):
+    """ObservedAction tuple from (street, is_me, action, amount) tuples."""
+    return tuple(ObservedAction(street=st, is_me=me, action=a, amount=amt, street_total=amt)
+                 for st, me, a, amt in acts)
+
+
+def test_line_discount_counts_opponent_postflop_bets_and_calls():
+    p = {**P.PARAMS, "bet_discount": 0.1, "street_discount": 0.05, "call_discount": 0.02}
+    h = _hist((Street.PREFLOP, False, Action.RAISE_POT, 6),      # preflop: ignored
+              (Street.FLOP, True, Action.RAISE_HALF, 6),
+              (Street.FLOP, False, Action.CHECK_CALL, 6),        # opp calls our bet
+              (Street.TURN, False, Action.RAISE_HALF, 9),        # opp bets the turn
+              (Street.TURN, True, Action.CHECK_CALL, 9),
+              (Street.RIVER, False, Action.CHECK_CALL, 0),       # a check is not a call
+              (Street.RIVER, False, Action.RAISE_POT, 30))       # opp bets the river
+    rng = random.Random(12)
+    obs = _obs(rng, street=Street.RIVER, action_history=h)
+    assert P.line_discount(obs, p) == pytest.approx(2 * 0.1 + 1 * 0.05 + 1 * 0.02)
+    assert P.line_discount(_obs(rng), p) == 0.0
+    off = {**P.PARAMS, "bet_discount": 0.0, "street_discount": 0.0, "call_discount": 0.0}
+    assert P.line_discount(obs, off) == 0.0
+
+
+def test_opponent_bet_makes_marginal_call_a_fold(no_mc):
+    rng = random.Random(13)
+    legal = (Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
+    h = _hist((Street.FLOP, False, Action.RAISE_HALF, 10))
+    obs = _obs(rng, street=Street.FLOP, to_call=10, pot=30, legal_actions=legal,
+               raises_this_street=1, action_history=h)
+    no_mc["eq"] = 0.25 + P.PARAMS["call_margin"] + 0.01   # just above pot odds before the discount
+    assert P.postflop_action(obs, {"postflop_params": {"bet_discount": 0.0}}, 1.0) == Action.CHECK_CALL
+    assert P.postflop_action(obs, {"postflop_params": {"bet_discount": 0.1}}, 1.0) == Action.FOLD
+
+
+def test_flop_bluffs_only_when_enabled(no_mc):
+    rng = random.Random(14)
+    legal = (Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
+    obs = _obs(rng, to_call=0, legal_actions=legal, raises_this_street=0)
+    while len(obs.board) != 3:
+        obs = _obs(rng, to_call=0, legal_actions=legal, raises_this_street=0)
+    no_mc["eq"] = 0.05
+    on = {"postflop_params": {"bluff_freq": 0.5, "bluff_max_eq": 0.3, "bluff_min_board": 3}}
+    off = {"postflop_params": {"bluff_freq": 0.5, "bluff_max_eq": 0.3, "bluff_min_board": 4}}
+    acts_on = [P.postflop_action(obs, on, 1.0, rng=rng) for _ in range(200)]
+    assert 0.3 < acts_on.count(Action.RAISE_HALF) / 200 < 0.7
+    assert all(P.postflop_action(obs, off, 1.0, rng=rng) == Action.CHECK_CALL for _ in range(50))
 
 
 def test_range_narrows_with_opponent_aggression():
