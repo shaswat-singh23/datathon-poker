@@ -6,3 +6,4 @@ Team repo. This file gets replaced by the submission README (a story ticket). `/
 - [PLAYBOOK.md](PLAYBOOK.md): how the team works: hats, timeline, syncs
 - [SETUP.md](SETUP.md): setup, tickets, parallel sessions, API keys
 - [findings/](findings/): one file per result
+- [STARTER_README.md](STARTER_README.md): the organizers' bundle README (running matches, build check, submission)
