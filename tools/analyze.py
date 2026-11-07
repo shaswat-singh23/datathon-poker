@@ -5,11 +5,15 @@ Reads the JSON written by tools/sim.py and breaks the hero's net result down by
 street reached, position, preflop percentile decile and the hero's actions,
 then lists the most expensive (street, position, bucket, action) situations.
 
-    python tools/analyze.py out.json                 # analyze a sim JSON that has per-hand logs
-    python tools/analyze.py out.json --hero agent    # whose view (bot name or file); default bot A
-    python tools/analyze.py out.json --generate --hero agent.py \\
+    python tools/analyze.py $DATA_DIR/analyze.json --hero agent.py --generate \\
         --field tools/opponents/*.py baseline-bots/*.py --deals 200 --seeds 1
-                                                     # run the matches first (with logs), then analyze
+                                   # run the matches (with per-hand logs), write the JSON, analyze
+    python tools/analyze.py $DATA_DIR/analyze.json --hero agent
+                                   # analyze an existing sim JSON that has per-hand logs
+
+Write the JSON under DATA_DIR (default ./data, see AGENTS.md), not the repo root.
+--hero is the bot name or file. It may be omitted only when every match has the
+same bot A; a round-robin JSON with several heroes needs --hero.
 
 Input schema
 ------------
@@ -31,8 +35,18 @@ Columns
 -------
 hands      hands in the cell (each deal is played twice, once per seat)
 bb/hand    hero's mean net per hand in the cell, in big blinds
-bb/deal    the cell's contribution to overall bb/deal (cell total / deals);
-           the rows of every table sum to the overall bb/deal, the judged number.
+bb/deal    the cell's contribution to overall bb/deal (cell total / all deals);
+           the rows of each table sum to the overall bb/deal, the judged number.
+           The per-street "1st act" tables include "(no act)" (the street was
+           reached but the hero never acted on it, e.g. preflop walks) and
+           "(not reached)" rows so they sum too.
+           Exception: the "opponent" table divides by that opponent's deals, so
+           its bb/deal is the hero's bb/deal against that opponent, the same
+           number tools/sim.py prints per match.
+
+"street reached" means the last street whose board was dealt or acted on, so an
+all-in with the board run out counts as RIVER even if nobody acted after the
+all-in.
 """
 from __future__ import annotations
 
@@ -53,6 +67,8 @@ BIG_BLIND = 2
 STREETS = ["PREFLOP", "FLOP", "TURN", "RIVER"]
 STREET_BY_BOARD = {0: "PREFLOP", 3: "FLOP", 4: "TURN", 5: "RIVER"}
 ACTION_SHORT = {"FOLD": "FOLD", "RAISE_HALF": "R_HALF", "RAISE_POT": "R_POT"}
+NO_ACT = "(no act)"            # street reached, hero never acted on it
+NOT_REACHED = "(not reached)"  # hand ended before this street
 
 _pct_fn = None
 
@@ -155,25 +171,49 @@ class Cell:
         self.bb += bb
 
 
-def _table(title: str, cells: dict[str, Cell], deals: int, order: Optional[list[str]] = None) -> None:
+def _table(title: str, cells: dict[str, Cell], deals: int, order: Optional[list[str]] = None,
+           deals_by_key: Optional[dict[str, int]] = None) -> None:
+    """Print one table. bb/deal divides by `deals`, or by deals_by_key[row] when given
+    (the opponent table: bb/deal against that opponent, as sim.py reports it)."""
     keys = order if order is not None else sorted(cells)
     keys = [k for k in keys if k in cells]
     w = max([len(title)] + [len(k) for k in keys]) + 2
-    print(f"\n{title:<{w}}{'hands':>8}{'%hands':>8}{'bb/hand':>10}{'bb/deal':>10}")
+    col = "bb/deal" if deals_by_key is None else "bb/deal*"
+    print(f"\n{title:<{w}}{'hands':>8}{'%hands':>8}{'bb/hand':>10}{col:>10}")
     total_n = sum(c.n for c in cells.values()) or 1
     for k in keys:
         c = cells[k]
-        print(f"{k:<{w}}{c.n:>8}{100 * c.n / total_n:>7.1f}%{c.bb / c.n:>+10.3f}{c.bb / deals:>+10.3f}")
+        d = deals if deals_by_key is None else max(1, deals_by_key.get(k, 0))
+        print(f"{k:<{w}}{c.n:>8}{100 * c.n / total_n:>7.1f}%{c.bb / c.n:>+10.3f}{c.bb / d:>+10.3f}")
+    if deals_by_key is not None:
+        print("* per opponent: this row's total / deals against that opponent (sim.py's number)")
 
 
 def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> int:
-    matches = [m for m in data.get("matches", []) if "crash" not in m]
+    all_matches = data.get("matches", [])
+    crashed = [m for m in all_matches if "crash" in m]
+    if crashed:
+        print(f"warning: skipping {len(crashed)} crashed match(es) "
+              f"(not counted in any table): "
+              + ", ".join(f"{os.path.basename(str(m.get('bot_a', '?')))} vs "
+                          f"{os.path.basename(str(m.get('bot_b', '?')))} seed {m.get('seed', '?')}"
+                          for m in crashed[:5])
+              + (" ..." if len(crashed) > 5 else ""), file=sys.stderr)
+    matches = [m for m in all_matches if "crash" not in m]
+    if hero is None:
+        heroes = sorted({str(m.get("bot_a", "")) for m in matches})
+        if len(heroes) > 1:
+            print("analyze: this JSON has several different bot A's "
+                  f"({', '.join(os.path.basename(h) for h in heroes)}); pass --hero.",
+                  file=sys.stderr)
+            return 1
     by_street: dict[str, Cell] = defaultdict(Cell)
     by_pos: dict[str, Cell] = defaultdict(Cell)
     by_bucket: dict[str, Cell] = defaultdict(Cell)
     by_opp: dict[str, Cell] = defaultdict(Cell)
     by_first: dict[str, dict[str, Cell]] = {s: defaultdict(Cell) for s in STREETS}
     by_sit: dict[tuple[str, str, str, str], Cell] = defaultdict(Cell)
+    deals_by_opp: dict[str, int] = defaultdict(int)
     deals = 0
     used = 0
     no_logs = 0
@@ -190,6 +230,7 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
         used += 1
         hero_name = hero_name or m.get(f"name_{side}")
         deals += int(m.get("deals", 0))
+        deals_by_opp[str(m.get("name_b" if side == "a" else "name_a", "?"))] += int(m.get("deals", 0))
         sign = 1 if side == "a" else -1
         has_paired = has_paired or "paired_bb" in m
         paired_total += sign * sum(m.get("paired_bb", []))
@@ -199,7 +240,9 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
             by_pos[h["pos"]].add(bb)
             by_bucket[h["bucket"]].add(bb)
             by_opp[h["opp"]].add(bb)
-            for s, act in h["first"].items():
+            reached_i = STREETS.index(h["street"])
+            for i, s in enumerate(STREETS):  # every hand lands in exactly one row per street
+                act = h["first"].get(s) or (NO_ACT if i <= reached_i else NOT_REACHED)
                 by_first[s][act].add(bb)
             by_sit[(h["street"], h["pos"], h["bucket"], h["last_act"])].add(bb)
 
@@ -217,16 +260,19 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
     print(f"Overall {total / deals:+.3f} bb/deal{check}")
 
     street_order = [s + sd for s in STREETS for sd in ("", " (showdown)")]
-    _table("street reached", by_street, deals, street_order)
+    _table("street reached (incl. all-in run-outs)", by_street, deals, street_order)
     _table("position", by_pos, deals, ["BTN", "BB"])
     _table("preflop pct", by_bucket, deals)
     if len(by_opp) > 1:
         _table("opponent", by_opp, deals,
-               sorted(by_opp, key=lambda k: by_opp[k].bb))
+               sorted(by_opp, key=lambda k: by_opp[k].bb / max(1, deals_by_opp.get(k, 0))),
+               deals_by_key=deals_by_opp)
     for s in STREETS:
         if by_first[s]:
+            acts = sorted((k for k in by_first[s] if k not in (NO_ACT, NOT_REACHED)),
+                          key=lambda k: by_first[s][k].bb)
             _table(f"{s.lower()} 1st act", by_first[s], deals,
-                   sorted(by_first[s], key=lambda k: by_first[s][k].bb))
+                   acts + [k for k in (NO_ACT, NOT_REACHED) if k in by_first[s]])
 
     worst = sorted(by_sit.items(), key=lambda kv: kv[1].bb)[:top]
     print(f"\n{top} most expensive situations (street reached, position, preflop pct,"
@@ -273,7 +319,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Break a sim.py JSON down by street, position, "
                                 "preflop percentile and action.")
     p.add_argument("json", help="sim JSON to read (or to write first, with --generate)")
-    p.add_argument("--hero", help="whose view: bot name or file (default: bot A of each match)")
+    p.add_argument("--hero", help="whose view: bot name or file (default: bot A, only if "
+                   "every match has the same bot A)")
     p.add_argument("--top", type=int, default=10, help="how many expensive situations to list")
     g = p.add_argument_group("--generate (run matches with per-hand logs, then analyze)")
     g.add_argument("--generate", action="store_true")
