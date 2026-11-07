@@ -111,7 +111,12 @@ def _pick(prefs, legal) -> Action:
 
 
 def opp_min_pct(obs, memory, p=PARAMS) -> float:
-    """Range-narrowing percentile from opponent raises in this hand."""
+    """Range-narrowing percentile from opponent raises in this hand.
+
+    First pass: counts only the opponent's raises, ignoring position and calls
+    (an opponent who flat-called a 3-bet is still treated as a random hand).
+    #12 (exploitative adjustments) should refine this with the opponent model.
+    """
     pre = post = 0
     for h in obs.action_history or ():
         if h.is_me or h.action not in _RAISES:

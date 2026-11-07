@@ -20,8 +20,12 @@ ALL = (Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
 SUBSETS = [s for k in range(1, 5) for s in combinations(ALL, k)]
 
 
-def _random_postflop_obs(rng: random.Random):
-    """Play random legal actions until a postflop decision; return its Observation."""
+def _random_postflop_obs(rng: random.Random, facing_bet: bool = False):
+    """Play random legal actions until a postflop decision; return its Observation.
+
+    facing_bet=True: once the target street is reached the opponent bets first
+    (a raise when one is legal), so the returned observation has to_call > 0.
+    """
     while True:
         deck = list(range(36))
         rng.shuffle(deck)
@@ -31,7 +35,19 @@ def _random_postflop_obs(rng: random.Random):
         target = rng.choice((Street.FLOP, Street.TURN, Street.RIVER))
         while not g.is_terminal:
             if g.street >= target:
-                return g.observation(g.to_act)
+                if not facing_bet:
+                    return g.observation(g.to_act)
+                street = g.street
+                raises = [a for a in g.legal_actions() if a in P._RAISES]
+                if not raises:
+                    break  # all-in or capped; try another deal
+                g.apply(rng.choice(raises))
+                if g.is_terminal or g.street != street:
+                    break
+                obs = g.observation(g.to_act)
+                if obs.to_call > 0:
+                    return obs
+                break
             legal = g.legal_actions()
             # bias towards calls so hands reach later streets
             a = Action.CHECK_CALL if rng.random() < 0.6 else rng.choice(legal)
@@ -63,6 +79,22 @@ def test_property_always_legal_and_never_raises():
             o = dataclasses.replace(obs, legal_actions=legal)
             a = P.postflop_action(o, mem, rng.choice((0.0, 0.1, 0.5, 1.0)), rng=rng)
             assert a in legal, (legal, a)
+
+
+def test_property_facing_a_bet_is_legal_and_sane():
+    """Facing a bet (to_call > 0): never illegal, and never a FOLD when only
+    CHECK_CALL is offered (the free-check rule in the other direction)."""
+    rng = random.Random(11)
+    seen = 0
+    for _ in range(120):
+        obs = _random_postflop_obs(rng, facing_bet=True)
+        assert obs.to_call > 0
+        seen += 1
+        assert P.postflop_action(obs, {}, 1.0, rng=rng) in obs.legal_actions
+        for legal in SUBSETS:
+            o = dataclasses.replace(obs, legal_actions=legal)
+            assert P.postflop_action(o, {}, 0.5, rng=rng) in legal
+    assert seen == 120
 
 
 def test_never_raises_on_bad_inputs(monkeypatch):
