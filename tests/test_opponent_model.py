@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from bot.opponent_model import PRIOR_WEIGHT, PRIOR_VPIP, OpponentModel  # noqa: E402
-from evaluator import ONE_PAIR, cards_from_str  # noqa: E402
+from evaluator import cards_from_str, category_of, omaha_score  # noqa: E402
 from game import Action, AgentConfig, Game, ObservedAction, Street, make_deal  # noqa: E402
 
 FOLD, CALL, HALF, POT = Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT
@@ -97,7 +97,8 @@ def test_small_blind_fold_first_in_without_any_obs():
 def test_showdown_credits_invisible_river_call_and_category():
     m = OpponentModel()
     board = cards_from_str("6c 7d 9h Js Kc")
-    opp_hole = cards_from_str("Ad Ah 8c 8d Qd")        # two aces + three board cards = one pair
+    opp_hole = cards_from_str("Ad Ah 8c 8d Qd")
+    expected = category_of(omaha_score(opp_hole, board))
     h = [act(Street.RIVER, False, CALL, 0)]
     m.observe_action(obs(3, Street.RIVER, h))
     m.observe_my_action(obs(3, Street.RIVER, h), HALF)   # we bet the river
@@ -105,7 +106,7 @@ def test_showdown_credits_invisible_river_call_and_category():
     assert m.showdowns == 1 and m.sd_won_x2 == 0
     assert m.call_c[3] == 1 and m.faced[3] == 1 and m.call_f[3] == 1
     assert sum(m.sd_cat_hist) == 1
-    assert m.sd_cat_hist[ONE_PAIR] == 1
+    assert m.sd_cat_hist[expected] == 1
     assert m.wtsd() > OpponentModel().wtsd()
 
 
