@@ -27,6 +27,7 @@ Usage:
     python tools/sim.py --hero agent.py --field tools/opponents/*.py baseline-bots/*.py --seeds 3 --procs 8
     python tools/sim.py --round-robin tools/opponents/*.py baseline-bots/*.py --seeds 2 --procs 8
     ... --json out.json      # save every match + the summary
+    ... --logs --json out.json   # also save per-hand records (matches[i]["logs"], ~1 KB/hand)
 
 Python:
     from sim import run_match      # with tools/ on sys.path
@@ -531,10 +532,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--overhead-ms", type=float, default=1000 * HTTP_OVERHEAD_SECONDS,
                    help="simulated HTTP/JSON cost charged per call (default %(default)s ms)")
     p.add_argument("--json", metavar="PATH", help="write all match results + summary as JSON")
+    p.add_argument("--logs", action="store_true",
+                   help="with --json: keep judge_engine per-hand records in matches[i][\"logs\"] "
+                        "= {\"half1\": [...], \"half2\": [...]} for tools/analyze.py (~1 KB/hand)")
     p.add_argument("--quiet", action="store_true", help="don't print each match")
     args = p.parse_args(argv)
 
     common = {"deals": args.deals, "time_bank": args.time_bank, "overhead": args.overhead_ms / 1000}
+    if args.logs:
+        common["keep_logs"] = True
     seeds = _seeds(args.seed_base, args.seeds)
     show = None if args.quiet else (lambda m: print(_match_line(m), flush=True))
     t0 = time.perf_counter()
@@ -648,7 +654,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"WARNING: {len(crashed)} matches crashed inside the simulator (see above)")
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
-            json.dump({"args": vars(args), "summary": summary, "matches": matches}, f, indent=1)
+            saved_args = {k: v for k, v in vars(args).items() if k != "logs" or v}
+            json.dump({"args": saved_args, "summary": summary, "matches": matches}, f, indent=1)
         print(f"wrote {args.json}")
     return 0
 
