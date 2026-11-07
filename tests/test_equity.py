@@ -191,12 +191,61 @@ def test_preflop_range_matches_reference():
     assert e < E.preflop_equity(h)  # a stronger range must lower our equity
 
 
-def test_default_call_standard_error_is_useful():
+def test_default_call_standard_error_is_useful(monkeypatch):
+    # the cost model on its reference machine; on a loaded box fewer samples fit in 1 ms
+    monkeypatch.setattr(E, "_SLOW", {k: 1.0 for k in E._SLOW})
+    monkeypatch.setattr(E, "_SLOW_EMA", {k: 1.0 for k in E._SLOW})
+    monkeypatch.setattr(E, "_observe_slow", lambda street, ratio: None)
     rng = random.Random(6)
     for nb in (3, 4, 5):
         d = rng.sample(range(36), 5 + nb)
         _, se = E.equity_se(d[:5], d[5:], rng=1)
         assert se < 0.03
+
+
+def test_budget_is_respected():
+    """Budgeted calls finish near time_budget_ms (generous bounds: CI boxes are noisy;
+    exact numbers come from a 200-spot harness, see PR #28's description)."""
+    import time
+    rng = random.Random(8)
+    for budget in (1.0, 8.0):
+        for nb in (3, 4, 5):
+            ts = []
+            for _ in range(15):
+                d = rng.sample(range(36), 5 + nb)
+                t0 = time.perf_counter()
+                E.equity(d[:5], d[5:], opp_min_pct=0.3, time_budget_ms=budget)
+                ts.append((time.perf_counter() - t0) * 1e3)
+            ts.sort()
+            assert ts[len(ts) // 2] < 2.0 * budget + 1.0, (budget, nb, ts)
+
+
+def test_budget_adapts_to_a_slower_machine(monkeypatch):
+    """If the cost table is 3x too optimistic, the slowdown factor catches up and
+    multi-batch calls stop at the deadline instead of overrunning ~3x."""
+    import time
+    cost = {k: (a / 3.0, b / 3.0) for k, (a, b) in E._COST.items()}
+    monkeypatch.setattr(E, "_COST", cost)
+    monkeypatch.setattr(E, "_SLOW", {k: 1.0 for k in E._SLOW})
+    monkeypatch.setattr(E, "_SLOW_EMA", {k: 1.0 for k in E._SLOW})
+    rng = random.Random(9)
+    ts = []
+    for _ in range(80):
+        d = rng.sample(range(36), 8)
+        t0 = time.perf_counter()
+        E.equity(d[:5], d[5:], time_budget_ms=12.0)
+        ts.append((time.perf_counter() - t0) * 1e3)
+    assert E._SLOW[3] > 1.5
+    late = sorted(ts[40:])
+    assert late[len(late) // 2] < 18.0, late
+
+
+def test_repeated_spot_is_deterministic_at_a_budget():
+    rng = random.Random(10)
+    for _ in range(30):
+        d = rng.sample(range(36), 9)
+        a = E.equity(d[:5], d[5:], time_budget_ms=2.0, rng=5)
+        assert a == E.equity(d[:5], d[5:], time_budget_ms=2.0, rng=5)
 
 
 def test_input_validation():
