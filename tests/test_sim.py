@@ -189,3 +189,24 @@ def test_decision_over_one_second_is_an_error(tmp_path):
     assert r["errors"]["a"] == [1, 1]
     assert "longer than 1s" in r["error_messages"]["a"][0]
     assert r["timing"]["a"][0]["max_call_ms"] > 1000
+    assert r["timing"]["a"][0]["max_cpu_call_ms"] < 100   # sleeping burns no CPU
+
+
+def test_cpu_time_fields_and_cpu_not_above_wall():
+    r = sim.run_match(RANDOM, STATION, deals=40, seed="cpu")
+    for side in ("a", "b"):
+        for h in r["timing"][side]:
+            for key in ("cpu_s", "max_cpu_call_ms", "mean_cpu_decision_ms",
+                        "wall_s", "max_call_ms", "mean_decision_ms"):
+                assert key in h
+            assert 0 <= h["cpu_s"] <= h["wall_s"] + 1e-4
+            assert 0 <= h["max_cpu_call_ms"] <= h["max_call_ms"] + 1e-3
+            assert h["mean_cpu_decision_ms"] <= h["mean_decision_ms"] + 1e-3
+
+
+def test_cpu_flag_only_when_cpu_is_slow():
+    t = {"max_half_think_s": 0.1, "max_half_compute_s": 0.1, "max_call_ms": 150.0,
+         "max_cpu_call_ms": 14.4, "errors": 0, "forfeits": 0, "timeouts": 0}
+    assert sim._flags(t) == "ok"            # a wall spike alone is machine load
+    t["max_cpu_call_ms"] = 120.0
+    assert "cpu max > 100 ms" in sim._flags(t)
