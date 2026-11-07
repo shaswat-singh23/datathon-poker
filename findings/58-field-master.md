@@ -9,6 +9,8 @@
 # reruns, gated to start only below load 10: same commands with --json data/58-field-tb{4,8}-r2.json
 ```
 
+Master moved during and after the runs. #60 (tools/sim.py CPU-time column, 16:16 local) and #55 (`bot/exploit.py`, 16:19) merged while the reruns were starting. Neither changes play: `bot/policy.py` doesn't call `bot/exploit.py` yet. #61 (#46, agent.py time accounting + `bot/timing.py`, 16:32) merged after every run here. So these numbers are master **before #46**. #46's own field runs on its rebased commit (`findings/46-agent-grace.md`: 26.0 / 36 at 4 s, 26.5 and 25.5 / 36 at 8 s) are the after-#46 numbers, and they agree with this file within noise.
+
 ## Load (1-min load average, sampled every 15 s during each run)
 
 | run | start | before | during (min to max) | after | used? |
