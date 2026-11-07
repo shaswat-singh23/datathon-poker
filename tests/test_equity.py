@@ -194,6 +194,8 @@ def test_preflop_range_matches_reference():
 def test_default_call_standard_error_is_useful(monkeypatch):
     # the cost model on its reference machine; on a loaded box fewer samples fit in 1 ms
     monkeypatch.setattr(E, "_SLOW", {k: 1.0 for k in E._SLOW})
+    monkeypatch.setattr(E, "_SLOW_EMA", {k: 1.0 for k in E._SLOW})
+    monkeypatch.setattr(E, "_observe_slow", lambda street, ratio: None)
     rng = random.Random(6)
     for nb in (3, 4, 5):
         d = rng.sample(range(36), 5 + nb)
