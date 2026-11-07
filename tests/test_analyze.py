@@ -90,9 +90,16 @@ def test_every_table_sums_to_overall(capsys, monkeypatch):
             "flop 1st act"} <= set(sums), sorted(sums)
     for title, s in sums.items():
         assert s == pytest.approx(2.5, abs=1e-6), (title, s)
-    # the '-' row: hero did not act on that street (the walk in half 2 preflop; unreached flops)
-    assert re.search(r"^-\s+1\s+25\.0%\s+\+1\.000\s+\+0\.500$", out, re.M), out  # preflop walk
-    assert re.search(r"^-\s+3\s+75\.0%", out, re.M), out  # flop: 3 of 4 hands never saw hero act
+    pre = out[out.index("preflop 1st act"):out.index("\nflop 1st act")]
+    flop = out[out.index("\nflop 1st act"):out.index("most expensive")]
+    # preflop: the walk in half 2 reached preflop but the hero never acted; every hand saw preflop
+    assert re.search(r"^\(no act\)\s+1\s+25\.0%\s+\+1\.000\s+\+0\.500$", pre, re.M), pre
+    assert "(not reached)" not in pre and not re.search(r"^-\s", pre, re.M), pre
+    # flop: half 1 hand 2 reached the river with no hero flop action (+4 chips);
+    # both half 2 hands ended preflop (+2 and -6 chips)
+    assert re.search(r"^\(no act\)\s+1\s+25\.0%\s+\+2\.000\s+\+1\.000$", flop, re.M), flop
+    assert re.search(r"^\(not reached\)\s+2\s+50\.0%\s+-1\.000\s+-1\.000$", flop, re.M), flop
+    assert not re.search(r"^-\s", flop, re.M), flop
 
 
 def test_opponent_table_is_per_opponent(capsys, monkeypatch):
@@ -118,6 +125,18 @@ def test_needs_hero_when_bot_a_varies_and_warns_on_crash(capsys):
     assert rc == 1 and "pass --hero" in err
     rc, out, err = _run(data, "hero", capsys)
     assert rc == 0 and "skipping 1 crashed match" in err and "+2.500 bb/deal" in out
+    assert "hero.py vs v.py seed 3" in err, err  # names the crashed match, not only the count
+
+
+def test_crash_warning_names_bots_and_seed(capsys):
+    crashed = [{"bot_a": "agent.py", "bot_b": "tools/opponents/exploiter.py", "seed": "sim-0", "crash": "x"},
+               {"bot_a": "agent.py", "bot_b": "baseline-bots/baseline_random.py", "seed": "sim-2",
+                "crash": "y"}]
+    rc, _, err = _run({"matches": [_match(bot_a="agent.py")] + crashed}, None, capsys)
+    assert rc == 0
+    assert "skipping 2 crashed match(es)" in err, err
+    assert "agent.py vs exploiter.py seed sim-0" in err, err
+    assert "agent.py vs baseline_random.py seed sim-2" in err, err
 
 
 def test_no_logs_exits_1(capsys):
