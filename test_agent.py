@@ -195,3 +195,56 @@ def test_reads_port_from_environment():
 # ---------------------------------------------------------------------------
 # Add your own tests below, e.g. "with two aces preflop my bot raises".
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Our own tests: the safety wrapper around bot/policy.py
+# ---------------------------------------------------------------------------
+
+class _BrokenPolicy:
+    """A policy that does everything wrong."""
+    def __init__(self, mode):
+        self.mode = mode
+
+    def new_half(self, config, memory):
+        if self.mode == "new_half":
+            raise RuntimeError("boom in new_half")
+
+    def choose_action(self, obs, memory):
+        if self.mode == "raise":
+            raise RuntimeError("boom")
+        if self.mode == "illegal":
+            return Action.FOLD          # illegal whenever to_call == 0
+        if self.mode == "garbage":
+            return "not an action"
+        return Action.CHECK_CALL
+
+    def on_hand_end(self, result, memory):
+        raise RuntimeError("boom in on_hand_end")
+
+
+@pytest.mark.parametrize("mode", ["raise", "illegal", "garbage", "new_half"])
+def test_broken_policy_never_causes_judge_errors(bot, mode):
+    module, client = bot
+    module._policy = _BrokenPolicy(mode)
+    assert start_half(client).status_code == 200
+    play_hands(client, 30, seed=f"broken-{mode}")   # asserts no 500s, no illegal actions
+
+
+def test_time_bank_is_tracked(bot):
+    module, client = bot
+    start_half(client)
+    play_hands(client, 20)
+    assert module.MEMORY["_decisions"] > 0
+    assert 0 < module.MEMORY["_spent"] < module.MEMORY["_bank"]
+
+
+def test_policy_skipped_when_time_bank_nearly_empty(bot):
+    module, client = bot
+    module._policy = _BrokenPolicy("raise")
+    start_half(client)
+    module.MEMORY["_spent"] = module.MEMORY["_bank"]
+    module.MEMORY["_time_left"] = 0.0
+    chosen = play_hands(client, 10, seed="empty-bank")
+    assert all(a in (Action.CHECK_CALL, Action.FOLD) for a in chosen)
+    assert not any(e.startswith("choose_action") for e in module.MEMORY["_policy_errors"])

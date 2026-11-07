@@ -39,72 +39,98 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "JustAsAwesomeAgent"
+PARTICIPANT = "datathon-poker"
+AGENT_NAME = "ShortDeckShark"
 
 
 # ===== YOUR CODE HERE =====
+#
+# agent.py stays a thin, crash-proof shell. The strategy lives in bot/policy.py
+# (same three functions). Everything here exists so that no bug in the
+# strategy can ever cost us an error (5 errors = forfeit = match loss):
+#   * policy exceptions are caught and replaced with a safe legal action,
+#   * anything not in obs.legal_actions is replaced the same way,
+#   * thinking time is tracked so the policy can budget it (memory["_time_left"]),
+#   * if bot.policy fails to even import, a tiny built-in fallback plays.
+import time as _time
+
+try:
+    from bot import policy as _policy
+    _POLICY_IMPORT_ERROR = None
+except Exception as _exc:  # never let a bad import kill the server
+    _policy = None
+    _POLICY_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+
+# The judge also counts request overhead (JSON, FastAPI) beyond the first free
+# 1 ms, which our own timer can't see. Charge a fixed extra per decision.
+_OVERHEAD_PER_DECISION = 0.0005
+_EMERGENCY_RESERVE = 0.25  # seconds; below this, stop calling the policy
+
+
+def _safe_action(obs: Observation) -> Action:
+    """Legal, zero-risk action: check if free, else fold (call if fold illegal)."""
+    legal = obs.legal_actions
+    if obs.to_call == 0 and Action.CHECK_CALL in legal:
+        return Action.CHECK_CALL
+    if Action.FOLD in legal:
+        return Action.FOLD
+    return Action.CHECK_CALL if Action.CHECK_CALL in legal else legal[0]
+
 
 def new_half(config: AgentConfig, memory: dict) -> None:
-    """Called at the start of each half-match (1000 hands).
-
-    `memory` is a fresh, empty dict every half. Store anything you want to
-    remember between hands in it, e.g. memory["opp_raises"] = 0.
-    `config` holds the match settings (starting_stack, big_blind, ...).
-
-    In the tournament, each half runs in a brand-new copy of your server,
-    so nothing you learn in one half carries over to the other half.
-    """
-    memory["hands_played"] = 0
+    """Called at the start of each half-match (1000 hands). memory is fresh."""
+    bank = float(getattr(config, "time_bank_seconds", 8.0) or 8.0)
+    memory["_bank"] = bank
+    memory["_spent"] = 0.0
+    memory["_time_left"] = bank
+    memory["_decisions"] = 0
+    memory["_policy_errors"] = []
+    memory["_policy_ok"] = _policy is not None
+    if _policy is not None:
+        try:
+            _policy.new_half(config, memory)
+        except Exception as exc:
+            memory["_policy_ok"] = False
+            memory["_policy_errors"].append(f"new_half: {type(exc).__name__}: {exc}")
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
-    """Called every time it is your turn. Return one of obs.legal_actions.
-
-    What you can see in obs:
-        hand_index          which hand of the half this is (0, 1, 2, ...)
-        street              Street.PREFLOP, Street.FLOP, Street.TURN or Street.RIVER
-        hole_cards          your 5 cards as ints, sorted ascending (0-35)
-        board               board (community) cards seen so far (0, 3, 4 or 5 ints)
-        pot                 total chips both players put in this hand
-        to_call             chips you must add to match the opponent
-        my_bet, opp_bet     chips you,opponent put in on THIS street
-        my_stack, opp_stack chips each player still has behind
-        is_button           True if you are the button (small blind)
-        legal_actions       the Actions you may return right now
-        raise_to            {RAISE_HALF: total, RAISE_POT: total} for legal raises
-        min_raise_to        smallest normal raise total (all-ins may be lower)
-        raises_this_street  raises so far this street (max 4)
-        action_history      this hand's actions so far; each has
-                            street, is_me, action, amount, street_total
-        big_blind           size of the big blind in chips
-
-    Actions: Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT
-    Cards are ints: card_rank(c) is 0 (six) .. 8 (ace), card_suit(c) is 0..3,
-    and cards_to_str(obs.hole_cards) prints them like "6h 7c 9s Kd Ah".
-    Once all 5 board cards are out, omaha_score(obs.hole_cards, obs.board)
-    scores your hand (higher is better).
-    """
-
-    # Simple example of a heuristic bot, which just checks when it is of no cost, otherwise folds
-    # Replace this with your strategy!
-    if obs.to_call == 0:
-        return Action.CHECK_CALL
-    return Action.FOLD
+    """Called every time it is our turn. Always returns one of obs.legal_actions."""
+    start = _time.perf_counter()
+    if "_bank" not in memory:  # defensive: new_half somehow skipped
+        new_half(AgentConfig(), memory)
+    action = None
+    if memory.get("_policy_ok") and memory["_time_left"] > _EMERGENCY_RESERVE:
+        try:
+            action = _policy.choose_action(obs, memory)
+        except Exception as exc:
+            errs = memory["_policy_errors"]
+            if len(errs) < 50:
+                errs.append(f"choose_action: {type(exc).__name__}: {exc}")
+            action = None
+    if not isinstance(action, Action) or action not in obs.legal_actions:
+        action = _safe_action(obs)
+    spent = _time.perf_counter() - start + _OVERHEAD_PER_DECISION
+    memory["_spent"] += spent
+    memory["_time_left"] = memory["_bank"] - memory["_spent"]
+    memory["_decisions"] += 1
+    return action
 
 
 def on_hand_end(result: HandResult, memory: dict) -> None:
-    """Called once for every finished hand. Optional: learn from what happened.
-
-    To save time, the judge sends finished hands along with your next
-    decision request, so this always runs BEFORE choose_action() sees the
-    next hand. (The last hands of a half arrive at the end of the half.)
-
-    result has: hand_index, my_net (chips won or lost), pot,
-    went_to_showdown, board (cards revealed), opp_hole (opponent's cards,
-    only after a showdown, else None), winner ('me', 'opp' or 'split').
-    """
-    memory["hands_played"] += 1
+    """Called once per finished hand. Never raises."""
+    if not memory.get("_policy_ok"):
+        return
+    start = _time.perf_counter()
+    try:
+        _policy.on_hand_end(result, memory)
+    except Exception as exc:
+        errs = memory.get("_policy_errors")
+        if isinstance(errs, list) and len(errs) < 50:
+            errs.append(f"on_hand_end: {type(exc).__name__}: {exc}")
+    if "_spent" in memory:
+        memory["_spent"] += _time.perf_counter() - start
+        memory["_time_left"] = memory["_bank"] - memory["_spent"]
 
 # ===== END OF YOUR CODE =====
 
