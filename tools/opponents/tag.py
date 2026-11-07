@@ -2,7 +2,7 @@
 tag.py - sim opponent: TAG (tight-aggressive Monte Carlo equity bot).
 
 The strongest reference opponent. Preflop: opens/3-bets good hands, defends
-by pot odds. Postflop: Monte Carlo equity vs a random hand (~120 samples),
+by pot odds. Postflop: Monte Carlo equity vs a random hand (~90 samples),
 discounted when the opponent has shown aggression (their range is stronger
 than random); value-bets and raises strong equity, calls on pot odds, folds
 otherwise, and bluffs the river occasionally in position.
@@ -158,7 +158,7 @@ def timed(fn):
 
 def new_half(config, memory):
     memory["rng"] = random.Random(22)
-    memory["budget"] = 4.5
+    memory["budget"] = 3.0
 
 
 @timed
@@ -178,7 +178,7 @@ def choose_action(obs, memory):
             return CALL
         return FOLD
 
-    eq = equity(obs, memory, 120)
+    eq = equity(obs, memory, 90)
     adj = eq - 0.07 * opp_raises(obs) - 0.05 * opp_raises(obs, obs.street)
     if obs.to_call == 0:
         if adj > 0.70:

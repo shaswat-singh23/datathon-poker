@@ -167,7 +167,7 @@ def choose_action(obs, memory):
         if pct >= 0.75 and obs.to_call <= 6:
             return CALL
         return pick(obs, FOLD)
-    eq = equity(obs, memory, 60)
+    eq = equity(obs, memory, 50)
     if obs.to_call == 0:
         if eq > 0.78:
             return pick(obs, POT)

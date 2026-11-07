@@ -15,8 +15,12 @@ counting, forfeits and the time bank behave like the tournament:
     decision (batched like the judge), crashes there count as errors;
   * 8 s thinking per half (first 1 ms of each call free), 1 s per call,
     5 errors = forfeit = match loss, empty bank = check/fold for the rest.
-  Not mirrored: a slow call cannot be interrupted in-process, and HTTP/JSON
-  overhead is absent (real bots spend a little more time per call).
+  * every call is charged its compute time + 0.5 ms simulated HTTP overhead
+    (--overhead-ms), minus the judge's 1 ms grace. "think" in the output is
+    that judge-style charge; "raw" is the bot's pure compute time.
+  Not mirrored: a slow call cannot be interrupted in-process (the judge would
+  move on after 1 s while the bot keeps computing), and the tournament machine
+  may be slower than yours: use --time-bank 4 to test with a safety margin.
 
 Usage:
     python tools/sim.py A.py B.py --deals 1000 --seeds 5 --procs 8
@@ -69,6 +73,12 @@ from game import (  # noqa: E402
 # Modules shared by all bots (pure helpers); never reloaded between halves.
 _SHARED_MODULES = {"game", "evaluator", "judge_engine", "sim", "__main__", "__mp_main__"}
 _counter = itertools.count()
+# Per-request HTTP + JSON cost a real bot pays on top of its own code (measured
+# with judge_engine against local uvicorn bots: 0.18 ms for tiny observations,
+# ~0.4 ms avg for full-length hands; 0.5 ms reproduced the judge's time-bank
+# charge for MC bots within ~5%). Added to every timed call,
+# so time-bank charging (elapsed - 1 ms grace) matches the judge.
+HTTP_OVERHEAD_SECONDS = 0.0005
 _BASELINE_MODULES = set(sys.modules)  # imported before any bot: never purged
 
 VERDICT_FOR_A = {je.AGENT1_WIN: "A_WIN", je.AGENT2_WIN: "B_WIN", je.CHOP: "CHOP",
@@ -173,10 +183,11 @@ class InProcessAgent:
     """Duck-types HttpAgentHandle so judge_engine.play_half can drive it."""
 
     def __init__(self, path: str, config: AgentConfig,
-                 grace: float = NETWORK_GRACE_SECONDS) -> None:
+                 grace: float = NETWORK_GRACE_SECONDS, overhead: float = HTTP_OVERHEAD_SECONDS) -> None:
         self.path = os.path.abspath(path)
         self.config = config
         self.grace = grace
+        self.overhead = overhead
         self.stats = SimStats()
         self.module = None
         self.memory: dict = {}
@@ -223,17 +234,18 @@ class InProcessAgent:
             value = fn()
         except Exception as exc:
             crash = _error_info(exc)
-        elapsed = time.perf_counter() - start
+        compute = time.perf_counter() - start        # the bot's own code
+        elapsed = compute + self.overhead              # what the judge would measure
 
         st = self.stats
         charged = min(elapsed, timeout)
-        st.wall_seconds += elapsed
+        st.wall_seconds += compute
         st.time_seconds += max(0.0, charged - self.grace)
         st.calls += 1
-        st.max_call_seconds = max(st.max_call_seconds, elapsed)
+        st.max_call_seconds = max(st.max_call_seconds, compute)
         if is_decision:
             st.decisions += 1
-            st.decision_seconds += elapsed
+            st.decision_seconds += compute
 
         if elapsed > timeout:  # the judge would have given up on this request
             if limited_by_bank:
@@ -331,13 +343,15 @@ def _timing(s: SimStats) -> dict[str, Any]:
 
 def run_match(bot_a: str, bot_b: str, deals: int = 1000, seed: Any = "sim",
               time_bank: float = TIME_BANK_SECONDS, grace: float = NETWORK_GRACE_SECONDS,
+              overhead: float = None,
               keep_paired: bool = True, keep_logs: bool = False) -> dict[str, Any]:
     """Play one duplicate match (2 halves, same seed, seats swapped).
     A = agent1 (seat 0 in half 1). All numbers are from A's point of view."""
     warmup()
     config = AgentConfig(num_hands=deals, time_bank_seconds=time_bank)
-    a = InProcessAgent(bot_a, config, grace)
-    b = InProcessAgent(bot_b, config, grace)
+    overhead = HTTP_OVERHEAD_SECONDS if overhead is None else overhead
+    a = InProcessAgent(bot_a, config, grace, overhead)
+    b = InProcessAgent(bot_b, config, grace, overhead)
     t0 = time.perf_counter()
     h1 = je.play_half(a, b, seed, 1, deals, keep_logs=keep_logs)
     h2 = je.play_half(a, b, seed, 2, deals, keep_logs=keep_logs)
@@ -443,6 +457,7 @@ def timing_summary(matches: list[dict[str, Any]], side: str) -> dict[str, Any]:
         "mean_decision_ms": tot_ms / dec if dec else 0.0,
         "max_call_ms": max((h["max_call_ms"] for h in halves), default=0.0),
         "max_half_think_s": max((h["think_s"] for h in halves), default=0.0),
+        "max_half_compute_s": max((h["wall_s"] for h in halves), default=0.0),
         "errors": sum(e for m in matches if "crash" not in m for e in m["errors"][side]),
         "forfeits": sum(f for m in matches if "crash" not in m for f in m["forfeited"][side]),
         "timeouts": sum(f for m in matches if "crash" not in m for f in m["timed_out"][side]),
@@ -453,7 +468,7 @@ def _flags(t: dict[str, Any]) -> str:
     out = []
     if t["max_half_think_s"] > TIME_BANK_SECONDS:
         out.append(f"OVER {TIME_BANK_SECONDS:g}s BANK")
-    elif t["max_half_think_s"] > 0.75 * TIME_BANK_SECONDS:
+    elif max(t["max_half_think_s"], t["max_half_compute_s"]) > 0.75 * TIME_BANK_SECONDS:
         out.append("near bank limit")
     if t["max_call_ms"] > 1000 * ACTION_TIMEOUT_SECONDS:
         out.append(f"OVER {ACTION_TIMEOUT_SECONDS:g}s/DECISION")
@@ -470,7 +485,8 @@ def _flags(t: dict[str, Any]) -> str:
 
 def _timing_line(label: str, t: dict[str, Any]) -> str:
     return (f"  {label:<26} mean {t['mean_decision_ms']:7.3f} ms/dec | max call "
-            f"{t['max_call_ms']:7.1f} ms | max half think {t['max_half_think_s']:6.2f} s | "
+            f"{t['max_call_ms']:7.1f} ms | max half think {t['max_half_think_s']:5.2f} s "
+            f"(raw {t['max_half_compute_s']:5.2f} s) | "
             f"{_flags(t)}")
 
 
@@ -512,11 +528,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--procs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     p.add_argument("--time-bank", type=float, default=TIME_BANK_SECONDS,
                    help="seconds per half (lower it to emulate a slower tournament machine)")
+    p.add_argument("--overhead-ms", type=float, default=1000 * HTTP_OVERHEAD_SECONDS,
+                   help="simulated HTTP/JSON cost charged per call (default %(default)s ms)")
     p.add_argument("--json", metavar="PATH", help="write all match results + summary as JSON")
     p.add_argument("--quiet", action="store_true", help="don't print each match")
     args = p.parse_args(argv)
 
-    common = {"deals": args.deals, "time_bank": args.time_bank}
+    common = {"deals": args.deals, "time_bank": args.time_bank, "overhead": args.overhead_ms / 1000}
     seeds = _seeds(args.seed_base, args.seeds)
     show = None if args.quiet else (lambda m: print(_match_line(m), flush=True))
     t0 = time.perf_counter()

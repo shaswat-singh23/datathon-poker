@@ -1,7 +1,7 @@
 """
 potodds.py - sim opponent: Pot-odds math bot.
 
-Calls/raises purely on equity vs pot odds (equity vs a random hand, 80
+Calls/raises purely on equity vs pot odds (equity vs a random hand, 60
 samples postflop, a fitted heuristic preflop). Bets for value only, never
 bluffs and never adjusts for the opponent's range.
 
@@ -160,7 +160,7 @@ def new_half(config, memory):
 
 @timed
 def choose_action(obs, memory):
-    eq = equity(obs, memory, 80)
+    eq = equity(obs, memory, 60)
     if obs.to_call == 0:
         if eq > 0.72:
             return pick(obs, POT)

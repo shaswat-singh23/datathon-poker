@@ -167,7 +167,7 @@ def choose_action(obs, memory):
         if pct >= 0.4 and obs.to_call <= 12:
             return CALL
         return pick(obs, FOLD)
-    eq = equity(obs, memory, 70)
+    eq = equity(obs, memory, 50)
     if eq > 0.75:
         if obs.street == Street.RIVER:
             return pick(obs, POT)
