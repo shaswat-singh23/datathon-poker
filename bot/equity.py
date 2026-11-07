@@ -297,10 +297,13 @@ _DEFAULT_RNG = np.random.default_rng()
 # (a slow moving average of the measured ratio after every call), but only jumps when
 # the average drifts more than _HYST away, so on a steady machine the planned count,
 # and hence the result for a given rng, stays the same from call to call.  A jump is
-# applied only when the queried spot changes, so asking about the same spot twice in
-# a row (same cards, range and budget) always plans the same count.  Samples
+# applied only when the queried spot changes, and a repeat of the same spot (same cards,
+# range and budget) draws exactly the count the first call realised, so asking twice in
+# a row with the same rng returns the same number.  Samples
 # are drawn in batches of at most _MAX_BATCH_US, and if the clock says the next batch
 # would end past _HARD * budget the call stops early (machine suddenly slower).
+# Small batches matter more than their ~25 us overhead: with 4 ms batches a 5 ms budget
+# was a single uncheckable batch and the max ran to 2x; at 1 ms it stays under 1.5x (#28).
 # Worst steady state: _SLOW_EMA = _HYST * _SLOW -> calls take _TARGET * _HYST ~ 0.975x the budget.
 _SLOW = {0: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
 _SLOW_EMA = dict(_SLOW)
@@ -308,11 +311,12 @@ _SLOW_MIN, _SLOW_MAX = 0.25, 50.0
 _SLOW_ALPHA = 0.05
 _HYST = 1.3              # re-plan when the average moves more than 30% from _SLOW
 _TARGET = 0.75           # plan to finish at this fraction of the budget
-_HARD = 1.15             # never start a batch predicted to end past this fraction
-_MAX_BATCH_US = 4000.0   # one batch's predicted cost cap
+_HARD = 1.0              # never start a batch predicted to end past this fraction of the budget
+_MAX_BATCH_US = 1000.0   # one batch's predicted cost cap: a deadline check at least every ~1 ms
 _BATCH_OVH_US = 25.0     # extra overhead per additional batch (dev laptop)
 _OBSERVE_MIN_US = 400.0  # only calls predicted at least this long update _SLOW_EMA
-_LAST_SPOT = None
+_LAST_SPOT = None        # (hole, board, opp_min_pct, budget) of the last budgeted call
+_LAST_SIZES: tuple = ()  # batch sizes that call actually drew (a repeat replays them exactly)
 
 
 def _to_generator(rng) -> np.random.Generator:
@@ -348,20 +352,27 @@ def _observe_slow(street: int, ratio: float) -> None:
     _SLOW_EMA[street] = ema
 
 
-def _replan(street: int, spot) -> None:
-    """Move _SLOW[street] to the average if it drifted out of band and the spot changed."""
+def _replan(street: int, spot) -> bool:
+    """Move _SLOW[street] to the average if it drifted out of band and the spot changed.
+    Returns True when `spot` repeats the previous call."""
     global _LAST_SPOT
     if spot == _LAST_SPOT:
-        return
+        return True
     _LAST_SPOT = spot
     ema = _SLOW_EMA[street]
     if not (1.0 / _HYST <= ema / _SLOW[street] <= _HYST):
         _SLOW[street] = ema
+    return False
 
 
-def _sample_budget(draw, street: int, budget_ms: float, t0: float) -> np.ndarray:
+def _sample_budget(draw, street: int, budget_ms: float, t0: float, repeat: bool = False) -> np.ndarray:
     """Draw the planned number of samples for budget_ms in batches, stopping early if
-    the clock says the next batch would end well past the budget."""
+    the clock says the next batch would end past the budget.  A repeat of the previous
+    spot draws exactly what that call drew, so the result for a given rng is reproducible."""
+    global _LAST_SIZES
+    if repeat and _LAST_SIZES:  # same batches in the same order -> same rng stream
+        chunks = [draw(m) for m in _LAST_SIZES]
+        return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
     fixed, per = _COST[street]
     slow = _SLOW[street]
     n_plan = _n_for_budget(street, _TARGET * budget_ms)
@@ -378,6 +389,7 @@ def _sample_budget(draw, street: int, budget_ms: float, t0: float) -> np.ndarray
         m = min(size, n_plan - got)
         chunks.append(draw(m))
         got += m
+    _LAST_SIZES = tuple(c.size for c in chunks)
     elapsed_us = (time.perf_counter() - t0) * 1e6
     pred_us = fixed + per * got + _BATCH_OVH_US * (len(chunks) - 1)
     if pred_us >= _OBSERVE_MIN_US:  # tiny calls measure Python overhead, not throughput
@@ -473,8 +485,8 @@ def equity_se(hole: Sequence[int], board: Sequence[int], *, opp_min_pct: float =
     if n_samples is not None:
         w = draw(max(1, int(n_samples)))
     else:
-        _replan(nb, (tuple(hole), tuple(board), opp_min_pct, time_budget_ms))
-        w = _sample_budget(draw, nb, float(time_budget_ms), t0)
+        rep = _replan(nb, (tuple(hole), tuple(board), opp_min_pct, time_budget_ms))
+        w = _sample_budget(draw, nb, float(time_budget_ms), t0, rep)
     n = w.size
     mean = float(w.mean())
     se = float(w.std() / math.sqrt(n)) if n > 1 else 0.5
