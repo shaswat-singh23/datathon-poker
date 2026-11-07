@@ -34,6 +34,12 @@ Optional memory keys (never required, safe defaults):
                                frequency (e.g. from bot/opponent_model.py).
                                Default PARAMS["default_aggression"].
     memory["postflop_params"]  dict of PARAMS overrides (merged over PARAMS).
+Written here: memory["_pf_aggr"], this half's count of the opponent's postflop
+bets and actions (observe_aggression).
+
+Line discounts (#39): Monte Carlo equity minus line_discount() is what gets
+compared with the thresholds. Each opponent postflop bet/raise this hand costs
+bet_discount, scaled down to 0 against opponents who bet habitually.
 
 Thresholds live in PARAMS so tuning tickets (#12) can adjust them.
 
@@ -66,6 +72,12 @@ PARAMS: dict = {
     "bet_discount": 0.15,      # per opponent postflop bet/raise this hand (#39)
     "street_discount": 0.0,    # extra per opponent bet/raise on the current street
     "call_discount": 0.0,      # per opponent postflop call of our bet this hand
+    # the discounts shrink against habitual bettors (measured postflop aggression,
+    # opponent bets+raises / postflop actions): full at <= disc_aggr_lo, none at >= disc_aggr_hi
+    "disc_aggr_lo": 0.25,      # tag / exploiter / nit measure 0.10-0.15
+    "disc_aggr_hi": 0.55,      # always_half / always_pot / maniac 0.9+, random 0.57, lag 0.45
+    "aggr_prior": 0.30,        # prior aggression ...
+    "aggr_prior_n": 10.0,      # ... worth this many opponent actions
     # range narrowing
     "pct_per_pre_raise": 0.10,   # opp_min_pct added per opponent preflop raise
     "pct_per_post_raise": 0.15,  # opp_min_pct added per opponent postflop bet/raise
@@ -172,13 +184,48 @@ def estimate_equity(obs, memory, budget_ms, p=PARAMS, rng=None) -> float:
     return _fallback_equity(hole, board)
 
 
-def line_discount(obs, p=PARAMS) -> float:
+def observe_aggression(obs, memory, p=PARAMS) -> float:
+    """Update and return the opponent's postflop aggression for this half.
+
+    Aggression = opponent postflop bets+raises / opponent postflop actions,
+    smoothed by a prior of aggr_prior over aggr_prior_n actions. Counts each
+    action once: memory["_pf_aggr"] = [bets, actions, hand_index, seen], where
+    `seen` is how much of this hand's action_history is already counted.
+    Opponent postflop bets always get a reply from us, so they are all seen.
+    """
+    st = memory.get("_pf_aggr")
+    if not (isinstance(st, list) and len(st) == 4):
+        st = [0.0, 0.0, None, 0]
+        memory["_pf_aggr"] = st
+    hist = tuple(obs.action_history or ())
+    if st[2] != obs.hand_index:
+        st[2], st[3] = obs.hand_index, 0
+    for h in hist[st[3]:]:
+        if not h.is_me and int(h.street) != 0:
+            st[1] += 1
+            if h.action in _RAISES:
+                st[0] += 1
+    st[3] = len(hist)
+    n0 = float(p["aggr_prior_n"])
+    return (st[0] + p["aggr_prior"] * n0) / (st[1] + n0) if st[1] + n0 > 0 else float(p["aggr_prior"])
+
+
+def discount_scale(aggr, p=PARAMS) -> float:
+    """1 against opponents who rarely bet (their bets mean strength), falling
+    linearly to 0 against habitual bettors (their bets mean little)."""
+    lo, hi = float(p["disc_aggr_lo"]), float(p["disc_aggr_hi"])
+    if hi <= lo:
+        return 1.0 if aggr <= lo else 0.0
+    return min(1.0, max(0.0, (hi - aggr) / (hi - lo)))
+
+
+def line_discount(obs, p=PARAMS, scale=1.0) -> float:
     """Equity to subtract for the opponent's postflop line in this hand.
 
     The Monte Carlo range only knows preflop strength. An opponent who bets or
     raises after the flop (or calls our bet) holds a hand that is strong on
     *this* board, so our equity against its real range is lower than the
-    engine says.
+    engine says. `scale` (discount_scale) shrinks it for habitual bettors.
     """
     bets = street_bets = calls = 0
     cur = int(obs.street)
@@ -192,7 +239,7 @@ def line_discount(obs, p=PARAMS) -> float:
                 street_bets += 1
         elif h.action == Action.CHECK_CALL and h.amount > 0:
             calls += 1
-    return bets * p["bet_discount"] + street_bets * p["street_discount"] + calls * p["call_discount"]
+    return scale * (bets * p["bet_discount"] + street_bets * p["street_discount"] + calls * p["call_discount"])
 
 
 def decide(eq, obs, p=PARAMS, rng=None) -> Action:
@@ -235,7 +282,8 @@ def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
             rng = random.Random(rng)
         elif not callable(getattr(rng, "random", None)):
             rng = random.Random(_seed(obs))
-        eq = estimate_equity(obs, memory, budget_ms, p, rng) - line_discount(obs, p)
+        scale = discount_scale(observe_aggression(obs, memory, p), p)
+        eq = estimate_equity(obs, memory, budget_ms, p, rng) - line_discount(obs, p, scale)
         a = decide(eq, obs, p, rng)
         return a if a in legal else _pick((), legal)
     except Exception:

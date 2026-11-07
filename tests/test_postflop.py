@@ -217,6 +217,39 @@ def test_line_discount_counts_opponent_postflop_bets_and_calls():
     assert P.line_discount(obs, off) == 0.0
 
 
+def test_observe_aggression_counts_each_action_once():
+    p = {**P.PARAMS, "aggr_prior": 0.3, "aggr_prior_n": 10.0}
+    rng = random.Random(15)
+    mem = {}
+    h1 = _hist((Street.PREFLOP, False, Action.RAISE_POT, 6),      # preflop: not counted
+               (Street.FLOP, False, Action.RAISE_HALF, 6))
+    a = P.observe_aggression(_obs(rng, hand_index=1, action_history=h1), mem, p)
+    assert a == pytest.approx((1 + 3) / (1 + 10))
+    # same hand, longer history: only the new actions count
+    h2 = h1 + _hist((Street.FLOP, True, Action.CHECK_CALL, 6), (Street.TURN, False, Action.CHECK_CALL, 0))
+    P.observe_aggression(_obs(rng, hand_index=1, action_history=h1), mem, p)   # repeat: no change
+    a = P.observe_aggression(_obs(rng, hand_index=1, action_history=h2), mem, p)
+    assert a == pytest.approx((1 + 3) / (2 + 10))
+    # next hand starts counting from the beginning of its own history
+    a = P.observe_aggression(_obs(rng, hand_index=2, action_history=h1[1:]), mem, p)
+    assert a == pytest.approx((2 + 3) / (3 + 10))
+
+
+def test_discount_scale_and_habitual_bettor_keeps_calling(no_mc):
+    p = {**P.PARAMS, "disc_aggr_lo": 0.25, "disc_aggr_hi": 0.55}
+    assert P.discount_scale(0.1, p) == 1.0
+    assert P.discount_scale(0.4, p) == pytest.approx(0.5)
+    assert P.discount_scale(0.9, p) == 0.0
+    rng = random.Random(16)
+    legal = (Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
+    h = _hist((Street.FLOP, False, Action.RAISE_HALF, 10))
+    obs = _obs(rng, street=Street.FLOP, to_call=10, pot=30, legal_actions=legal,
+               raises_this_street=1, action_history=h)
+    no_mc["eq"] = 0.25 + P.PARAMS["call_margin"] + 0.01
+    assert P.postflop_action(obs, {"_pf_aggr": [0.0, 100.0, None, 0]}, 1.0) == Action.FOLD        # passive: discount
+    assert P.postflop_action(obs, {"_pf_aggr": [95.0, 100.0, None, 0]}, 1.0) == Action.CHECK_CALL  # maniac: none
+
+
 def test_opponent_bet_makes_marginal_call_a_fold(no_mc):
     rng = random.Random(13)
     legal = (Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
