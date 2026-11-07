@@ -85,11 +85,14 @@ def test_every_table_sums_to_overall(capsys, monkeypatch):
     rc, out, _ = _run({"matches": [_match()]}, "hero", capsys)
     assert rc == 0
     sums = _table_sums(out)
-    assert {"position", "preflop pct", "preflop 1st act", "flop 1st act",
-            "turn 1st act", "river 1st act"} <= set(sums), sorted(sums)
+    # per-street tables are printed only for streets where the hero acted at least once
+    assert {"street reached", "position", "preflop pct", "preflop 1st act",
+            "flop 1st act"} <= set(sums), sorted(sums)
     for title, s in sums.items():
         assert s == pytest.approx(2.5, abs=1e-6), (title, s)
-    assert "(no act)" in out and "(not reached)" in out  # the walk in half 2, and unreached streets
+    # the '-' row: hero did not act on that street (the walk in half 2 preflop; unreached flops)
+    assert re.search(r"^-\s+1\s+25\.0%\s+\+1\.000\s+\+0\.500$", out, re.M), out  # preflop walk
+    assert re.search(r"^-\s+3\s+75\.0%", out, re.M), out  # flop: 3 of 4 hands never saw hero act
 
 
 def test_opponent_table_is_per_opponent(capsys, monkeypatch):
@@ -103,8 +106,9 @@ def test_opponent_table_is_per_opponent(capsys, monkeypatch):
     assert rc == 0
     assert "Overall +1.250 bb/deal" in out  # (+10 + 0) chips / 2 bb / 4 deals
     opp = out[out.index("opponent"):]
-    assert re.search(r"^villain\s+4\s+50\.0%\s+\+1\.250\s+\+2\.500$", opp, re.M), opp  # vs villain alone
-    assert re.search(r"^other\s+4\s+50\.0%\s+\+0\.000\s+\+0\.000$", opp, re.M), opp
+    # bb/deal = vs that opponent alone (+10 chips / 2 bb / 2 deals), share of total = / all 4 deals
+    assert re.search(r"^villain\s+4\s+50\.0%\s+\+1\.250\s+\+2\.500\s+\+1\.250$", opp, re.M), opp
+    assert re.search(r"^other\s+4\s+50\.0%\s+\+0\.000\s+\+0\.000\s+\+0\.000$", opp, re.M), opp
 
 
 def test_needs_hero_when_bot_a_varies_and_warns_on_crash(capsys):

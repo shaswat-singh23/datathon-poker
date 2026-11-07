@@ -20,8 +20,12 @@ ALL = (Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
 SUBSETS = [s for k in range(1, 5) for s in combinations(ALL, k)]
 
 
-def _random_postflop_obs(rng: random.Random):
-    """Play random legal actions until a postflop decision; return its Observation."""
+def _random_postflop_obs(rng: random.Random, facing_bet: bool = False):
+    """Play random legal actions until a postflop decision; return its Observation.
+
+    facing_bet=True: once the target street is reached the opponent bets first
+    (a raise when one is legal), so the returned observation has to_call > 0.
+    """
     while True:
         deck = list(range(36))
         rng.shuffle(deck)
@@ -31,7 +35,19 @@ def _random_postflop_obs(rng: random.Random):
         target = rng.choice((Street.FLOP, Street.TURN, Street.RIVER))
         while not g.is_terminal:
             if g.street >= target:
-                return g.observation(g.to_act)
+                if not facing_bet:
+                    return g.observation(g.to_act)
+                street = g.street
+                raises = [a for a in g.legal_actions() if a in P._RAISES]
+                if not raises:
+                    break  # all-in or capped; try another deal
+                g.apply(rng.choice(raises))
+                if g.is_terminal or g.street != street:
+                    break
+                obs = g.observation(g.to_act)
+                if obs.to_call > 0:
+                    return obs
+                break
             legal = g.legal_actions()
             # bias towards calls so hands reach later streets
             a = Action.CHECK_CALL if rng.random() < 0.6 else rng.choice(legal)
@@ -63,6 +79,22 @@ def test_property_always_legal_and_never_raises():
             o = dataclasses.replace(obs, legal_actions=legal)
             a = P.postflop_action(o, mem, rng.choice((0.0, 0.1, 0.5, 1.0)), rng=rng)
             assert a in legal, (legal, a)
+
+
+def test_property_facing_a_bet_is_legal_and_sane():
+    """Facing a bet (to_call > 0): never illegal, and never a FOLD when only
+    CHECK_CALL is offered (the free-check rule in the other direction)."""
+    rng = random.Random(11)
+    seen = 0
+    for _ in range(120):
+        obs = _random_postflop_obs(rng, facing_bet=True)
+        assert obs.to_call > 0
+        seen += 1
+        assert P.postflop_action(obs, {}, 1.0, rng=rng) in obs.legal_actions
+        for legal in SUBSETS:
+            o = dataclasses.replace(obs, legal_actions=legal)
+            assert P.postflop_action(o, {}, 0.5, rng=rng) in legal
+    assert seen == 120
 
 
 def test_never_raises_on_bad_inputs(monkeypatch):
@@ -187,3 +219,62 @@ def test_monte_carlo_sanity():
                 to_call=20, pot=60, raises_this_street=1, action_history=())
     assert P.postflop_action(dataclasses.replace(base, hole_cards=tuple(nuts)), {}, 1.0) == Action.RAISE_POT
     assert P.postflop_action(dataclasses.replace(base, hole_cards=tuple(air)), {}, 1.0) == Action.FOLD
+
+
+def test_cat_eq_monotone_in_evaluator_order():
+    import evaluator as EV
+    order = (EV.HIGH_CARD, EV.ONE_PAIR, EV.TWO_PAIR, EV.STRAIGHT, EV.THREE_OF_A_KIND,
+             EV.FULL_HOUSE, EV.FLUSH, EV.FOUR_OF_A_KIND, EV.STRAIGHT_FLUSH)
+    assert all(P._CAT_EQ[a] < P._CAT_EQ[b] for a, b in zip(order, order[1:]))
+
+
+def test_deterministic_same_inputs_same_decision():
+    rng = random.Random(10)
+    for _ in range(40):
+        obs = _random_postflop_obs(rng)
+        for budget in (0.1, 1.0, 5.0):
+            # no rng: per-decision seed derived from the observation
+            assert P.postflop_action(obs, {}, budget) == P.postflop_action(obs, {}, budget)
+            assert P.estimate_equity(obs, {}, budget) == P.estimate_equity(obs, {}, budget)
+            # same caller seed twice -> same equity and action
+            e1 = P.estimate_equity(obs, {}, budget, rng=random.Random(42))
+            e2 = P.estimate_equity(obs, {}, budget, rng=random.Random(42))
+            assert e1 == e2
+            assert (P.postflop_action(obs, {}, budget, rng=random.Random(42))
+                    == P.postflop_action(obs, {}, budget, rng=random.Random(42)))
+
+
+def test_rng_passed_to_equity(monkeypatch):
+    seen = []
+    real = E.equity
+
+    def spy(*a, **k):
+        seen.append(k.get("rng"))
+        return real(*a, **k)
+    monkeypatch.setattr(E, "equity", spy)
+    obs = _random_postflop_obs(random.Random(11))
+    r = random.Random(5)
+    P.postflop_action(obs, {}, 1.0, rng=r)
+    P.postflop_action(obs, {}, 1.0)
+    assert seen[0] is r and seen[1] is not None
+
+
+def test_huge_budget_is_capped_and_fast(monkeypatch):
+    import time
+    calls = []
+    real = E.equity
+
+    def spy(*a, **k):
+        calls.append(k.get("time_budget_ms"))
+        return real(*a, **k)
+    monkeypatch.setattr(E, "equity", spy)
+    rng = random.Random(12)
+    worst = 0.0
+    for _ in range(30):
+        obs = _random_postflop_obs(rng)
+        t0 = time.perf_counter()
+        a = P.postflop_action(obs, {}, 5000.0, rng=rng)
+        worst = max(worst, (time.perf_counter() - t0) * 1000.0)
+        assert a in obs.legal_actions
+    assert calls and max(calls) <= P.PARAMS["max_equity_ms"]
+    assert worst < 100.0, worst
