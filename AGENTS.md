@@ -78,7 +78,7 @@ Each issue has exactly one priority label: `must`, `should`, or `nice`. Add `bug
 - Only pick unassigned issues whose Depends on issues are all closed.
 - Claim it: `gh issue edit N --add-assignee @me`. Then check the assignees again. If someone else is on it too, unassign yourself and pick another.
 - One ticket per agent session. A person can run several sessions, each on its own ticket in its own worktree.
-- **Home repo first.** Run /work in the repo for the challenge you're on. Overflow to another repo only when yours has no unblocked `must` ticket, or when the HQ status issue (datathon-dashboard, label `status`) says another repo is starved or near a deadline. In another repo you build and open PRs; its decider merges anything that claims a result.
+- **Home repo first.** Run /work in the repo for the challenge you're on. Overflow to another repo only when yours has no unblocked `must` ticket, or when the HQ status issue (datathon-dashboard, label `status`) says another repo is starved or near a deadline. In another repo you build and open PRs; its reviewer handles merging.
 - **Fan-out** (Claude Code, best on a large usage plan): `/fanout` claims several independent S or M tickets and runs each in its own background worktree subagent. One review of the list, several PRs.
 
 ## Working a task
@@ -90,7 +90,7 @@ Each issue has exactly one priority label: `must`, `should`, or `nice`. Add `bug
 4. **Verify.** Check every Done-when item by actually running it. Don't assume.
 5. **Sync.** `git fetch origin && git rebase origin/master`, fix any conflicts, then verify again.
 6. **Open a PR.** Title `#N: <goal>`. The body has `Closes #N`, how each Done-when item was checked, and any number produced. Comment the PR link on the issue.
-7. **Merge.** A PR that produces a result that will be claimed (a number, a score, a finding) is merged by this repo's decider, after someone other than the author has reviewed it. The orchestrator's review comment counts as a first pass. Anything else, the author merges once checks pass. Agents never merge without a human saying so.
+7. **Merge.** An independent reviewer (a separate agent session running `/merge-queue` on a loop) reviews every PR, reruns its checks on the exact commit, and either merges it or comments `Reviewer: changes requested`. Authors don't merge their own PRs. If you get changes requested, have your agent fix them and push; the reviewer re-reviews new commits. PRs that touch `AGENTS.md`, `.claude/`, `.agents/`, or `.github/` get the `needs-human` label and the decider merges them. Agents never merge their own work.
 8. **Blocked for more than 15 minutes?** Comment what's blocking on the issue, unassign yourself, and pick another.
 
 ## Avoiding merge conflicts
