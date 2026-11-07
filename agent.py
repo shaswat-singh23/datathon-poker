@@ -61,9 +61,15 @@ except Exception as _exc:  # never let a bad import kill the server
     _policy = None
     _POLICY_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
-# The judge also counts request overhead (JSON, FastAPI) beyond the first free
-# 1 ms, which our own timer can't see. Charge a fixed extra per decision.
+# The judge charges each request max(0, elapsed - 1 ms grace), where elapsed
+# also holds request overhead (JSON, FastAPI, network) our timer can't see.
+# We charge max(0, our time + _OVERHEAD_PER_DECISION - _GRACE_CREDIT), i.e.
+# our time minus 0.4 ms: at or above the judge's charge for any request
+# overhead up to 0.6 ms (measured locally: 0.18-0.4 ms; tools/sim.py models
+# 0.5 ms). If a slow network ate the whole grace we would under-count by at
+# most 0.4 ms a decision (~1.2 s per half), inside timing.py's 1.5 s reserve.
 _OVERHEAD_PER_DECISION = 0.0005
+_GRACE_CREDIT = 0.0009
 _EMERGENCY_RESERVE = 0.25  # seconds; below this, stop calling the policy
 
 
@@ -119,8 +125,13 @@ def choose_action(obs: Observation, memory: dict) -> Action:
             action = None
     if not isinstance(action, Action) or action not in obs.legal_actions:
         action = _safe_action(obs)
-    spent = _time.perf_counter() - start + _OVERHEAD_PER_DECISION
-    memory["_spent"] += spent
+    # The judge times on_hand_end() and this call as one /act request, so the
+    # grace covers both: re-charge the hand-end time already counted together
+    # with this call (the adjustment can be negative, never below 0 in total).
+    hand_end = memory.pop("_hand_end_s", 0.0)
+    spent = max(0.0, hand_end + _time.perf_counter() - start
+                + _OVERHEAD_PER_DECISION - _GRACE_CREDIT)
+    memory["_spent"] += spent - hand_end
     memory["_time_left"] = memory["_bank"] - memory["_spent"]
     memory["_decisions"] += 1
     return action
@@ -138,7 +149,9 @@ def on_hand_end(result: HandResult, memory: dict) -> None:
         if isinstance(errs, list) and len(errs) < 50:
             errs.append(f"on_hand_end: {type(exc).__name__}: {exc}")
     if "_spent" in memory:
-        memory["_spent"] += _time.perf_counter() - start
+        took = _time.perf_counter() - start
+        memory["_spent"] += took
+        memory["_hand_end_s"] = memory.get("_hand_end_s", 0.0) + took
         memory["_time_left"] = memory["_bank"] - memory["_spent"]
 
 # ===== END OF YOUR CODE =====
