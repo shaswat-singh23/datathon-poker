@@ -166,7 +166,7 @@ def test_free_check_back_weak_and_bet_strong(no_mc):
     legal = (Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
     obs = _obs(rng, to_call=0, legal_actions=legal, raises_this_street=0)
     never_bluff = {"postflop_params": {"bluff_freq": 0.0}}
-    for eq in (0.0, 0.1, 0.3, 0.5):
+    for eq in (0.0, 0.1, 0.3, P.PARAMS["bet_half_eq"] - 0.01):
         no_mc["eq"] = eq
         assert P.postflop_action(obs, never_bluff, 1.0) == Action.CHECK_CALL
     no_mc["eq"] = 0.99

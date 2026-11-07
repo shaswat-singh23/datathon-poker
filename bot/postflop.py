@@ -53,17 +53,17 @@ from bot import equity as _eq
 PARAMS: dict = {
     # facing a bet
     "call_margin": 0.03,       # call if equity >= pot_odds + call_margin
-    "raise_half_eq": 0.72,     # raise half pot at or above this equity
+    "raise_half_eq": 0.66,     # raise half pot at or above this equity (#39: 0.72 -> 0.66)
     "raise_pot_eq": 0.82,      # raise pot at or above this equity
     "reraise_step": 0.06,      # each raise already made this street adds this to raise/bet thresholds
     # checked to us / first to act
-    "bet_half_eq": 0.62,       # bet half pot at or above this equity
+    "bet_half_eq": 0.44,       # bet half pot at or above this equity (#39: 0.62 -> 0.44)
     "bet_pot_eq": 0.78,        # bet pot at or above this equity
-    "bluff_freq": 0.10,        # chance to bluff half pot when free and equity is low (turn/river only)
-    "bluff_max_eq": 0.20,      # only bluff with equity below this
-    "bluff_min_board": 4,      # bluff only once the board has this many cards (3 = flop too)
+    "bluff_freq": 0.50,        # chance to bluff half pot when free and equity is low (#39: 0.10 -> 0.50)
+    "bluff_max_eq": 0.40,      # only bluff with equity below this (#39: 0.20 -> 0.40)
+    "bluff_min_board": 3,      # bluff once the board has this many cards (#39: 3 = flop too; was turn/river only)
     # postflop line discounts (subtracted from Monte Carlo equity before deciding)
-    "bet_discount": 0.0,       # per opponent postflop bet/raise this hand
+    "bet_discount": 0.15,      # per opponent postflop bet/raise this hand (#39)
     "street_discount": 0.0,    # extra per opponent bet/raise on the current street
     "call_discount": 0.0,      # per opponent postflop call of our bet this hand
     # range narrowing
