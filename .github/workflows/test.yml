@@ -1,0 +1,42 @@
+# CI: run the test suite on every pull request and every push to master.
+# Keeps AGENTS.md rule 6 ("master always runs") enforced by a green check.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# A new push to the same PR cancels the run still going for the old commit.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Python 3.12)
+    runs-on: ubuntu-latest
+    # Issue #6 done-when: the run finishes in under 3 minutes.
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # requirements-dev.txt starts with "-r requirements.txt", so this
+      # installs the tournament deps plus pytest. numpy/torch are not in
+      # requirements.txt (they come from the tournament base image), so
+      # nothing heavy is downloaded here.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
