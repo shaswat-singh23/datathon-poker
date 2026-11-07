@@ -15,7 +15,7 @@ play is #12.
 """
 from game import Street
 
-from bot import equity, postflop, preflop, timing
+from bot import equity, postflop, preflop, pressure, timing
 
 try:
     from bot import opponent_model as _om
@@ -52,7 +52,8 @@ def choose_action(obs, memory):
     _observe(memory, "observe_action", obs)
     if obs.street == Street.PREFLOP:
         return preflop.preflop_action(obs, memory, equity.preflop_percentile(obs.hole_cards))
-    return postflop.postflop_action(obs, memory, timing.budget_ms(memory, obs))
+    # bot.pressure wraps bot.postflop: same decisions plus fold-equity bets (#68)
+    return pressure.postflop_action(obs, memory, timing.budget_ms(memory, obs))
 
 
 def on_hand_end(result, memory):
