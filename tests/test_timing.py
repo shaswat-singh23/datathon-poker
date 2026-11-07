@@ -1,7 +1,8 @@
 """Tests for bot/timing.py: budget bounds, calibration, and a simulated half.
 
-The simulation charges time the way agent.py does (real time + 0.5 ms per
-decision) and pessimistically: Monte Carlo overshoots its budget by 10% and the
+The simulation charges time the way agent.py does (per decision
+max(0, real time + 0.5 ms overhead - 0.9 ms grace credit), #46) and
+pessimistically (hand-end time is charged outside the grace): Monte Carlo overshoots its budget by 10% and the
 non-MC policy code costs more than timing.py assumes.
 """
 import os
@@ -17,6 +18,8 @@ from game import NUM_DEALS, TIME_BANK_SECONDS, Street  # noqa: E402
 
 LIMIT_S = 6.5
 EMERGENCY_RESERVE_S = 0.25  # agent.py stops calling the policy below this
+AGENT_OVERHEAD_MS = 0.5     # agent.py's _OVERHEAD_PER_DECISION
+AGENT_GRACE_MS = 0.9        # agent.py's _GRACE_CREDIT
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +79,9 @@ def simulate(hand_shape, speed=1.0, mc_overshoot=1.10, policy_overhead_ms=None,
             if asks and mem["_time_left"] > EMERGENCY_RESERVE_S:
                 ms = timing.budget_ms(mem, obs(h, street, pot, to_call))
                 budgets.append(ms)
-            charged_ms = ms * mc_overshoot + policy_overhead_ms + timing.WRAPPER_OVERHEAD_MS
+            real_ms = ms * mc_overshoot + policy_overhead_ms
+            charged_ms = max(timing.WRAPPER_OVERHEAD_MS,
+                             real_ms + AGENT_OVERHEAD_MS - AGENT_GRACE_MS)
             mc_this_hand += ms
             mem["_spent"] += charged_ms / 1000.0
             mem["_time_left"] = mem["_bank"] - mem["_spent"]
@@ -162,12 +167,15 @@ def test_worst_case_half_stays_under_limit(speed, overhead_mult):
 
 
 def test_backs_off_when_fixed_cost_alone_exceeds_limit():
-    # 8 decisions every hand on a 2x slower CPU with 2x the expected non-MC
-    # cost: the per-decision overhead alone is ~8.8 s, more than the bank.
+    # 8 decisions every hand on a 2x slower CPU whose non-MC code costs 1.4 ms
+    # a decision: the charged overhead alone is ~9.2 s, more than the bank.
     # No budget can fix that; timing.py must at least add (almost) nothing.
-    po = 2 * timing.POLICY_OVERHEAD_MS * 2.0
+    # The prior (0.3 ms at 2x) is 4x too low here, so warm-up still grants a
+    # little; once the overhead is measured, nothing.
+    po = 1.4
     mem, mc, _ = simulate(WORST_HAND, speed=2.0, policy_overhead_ms=po)
-    assert sum(mc) * 1.10 / 1000.0 < 0.1
+    assert sum(mc[timing.WARMUP_HANDS:]) == 0.0
+    assert sum(mc) * 1.10 / 1000.0 < 0.15
 
 
 @pytest.mark.parametrize("speed", [1.0, 2.0])
@@ -222,9 +230,10 @@ def test_4s_bank_station_hands_stay_under_limit():
 
 
 def test_4s_bank_worst_case_backs_off():
-    # 8 decisions every hand cost 6.4 s in fixed overhead alone, more than the
-    # 4 s bank: no budget can fix that, so Monte Carlo must add (almost) nothing.
-    mem, mc, budgets = simulate(WORST_HAND, bank=4.0, preflop_asks=False)
+    # 8 decisions every hand at 1.05 ms of non-MC code cost 6.4 s in charged
+    # overhead alone, more than the 4 s bank: no budget can fix that, so Monte
+    # Carlo must add (almost) nothing.
+    mem, mc, budgets = simulate(WORST_HAND, bank=4.0, preflop_asks=False, policy_overhead_ms=1.05)
     assert sum(mc) * 1.10 / 1000.0 < 0.1
     assert max(budgets) <= timing.CEIL_MS
 

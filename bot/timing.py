@@ -1,8 +1,10 @@
 """bot/timing.py - how many milliseconds of Monte Carlo each decision may use.
 
 The judge gives 8 s of charged thinking time per 1000-hand half. agent.py
-tracks what we have used in ``memory["_time_left"]`` (seconds; it already adds
-0.5 ms per decision for request overhead). This module turns that into a
+tracks what we have used in ``memory["_time_left"]`` (seconds). Like the
+judge, it charges each /act request max(0, time + 0.5 ms request overhead -
+0.9 ms of the judge's 1 ms grace), so a cheap decision costs nothing and a
+Monte Carlo one about its own time (#46). This module turns that into a
 per-decision budget:
 
     from bot import timing                   # import runs calibrate() once (startup)
@@ -17,7 +19,7 @@ Guarantees:
       code) is held back for every decision still to come, so Monte Carlo can
       never starve the cheap decisions at the end of the half. Before warm-up
       the allowance uses pessimistic priors; after WARMUP_HANDS it uses the
-      measured overhead (never below the 0.5 ms agent.py always charges) and
+      measured overhead (never below WRAPPER_OVERHEAD_MS) and
       the observed decisions per hand.
     * Each budget is 0 (inside the reserve: play the cheap path) or lies in
       [FLOOR_MS, CEIL_MS]. FLOOR_MS is above postflop's Monte Carlo minimum
@@ -48,7 +50,8 @@ CEIL_MS = 12.0             # largest single budget: ~25k flop samples, more adds
                            # no precision and only exposes the equity overrun (#28)
 MAX_SHARE = 0.03           # one decision gets at most 3% of what is spendable
 
-WRAPPER_OVERHEAD_MS = 0.5  # agent.py charges this per decision on top of real time
+WRAPPER_OVERHEAD_MS = 0.0  # agent.py's fixed charge per decision on top of real time:
+                           # 0 since #46 (the grace credit covers its 0.5 ms)
 POLICY_OVERHEAD_MS = 0.15  # non-MC policy work per decision at reference speed
 OVERHEAD_MARGIN = 1.25     # safety factor on the prior overhead allowance
 MEASURED_MARGIN = 1.1      # safety factor once the overhead is measured
