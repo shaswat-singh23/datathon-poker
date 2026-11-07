@@ -5,9 +5,11 @@ Reads the JSON written by tools/sim.py and breaks the hero's net result down by
 street reached, position, preflop percentile decile and the hero's actions,
 then lists the most expensive (street, position, bucket, action) situations.
 
-    python tools/analyze.py out.json                 # analyze a sim JSON that has per-hand logs
-    python tools/analyze.py out.json --hero agent    # whose view (bot name or file); default bot A
-    python tools/analyze.py out.json --generate --hero agent.py \\
+sim JSON lives in $DATA_DIR (default ./data, see AGENTS.md):
+
+    python tools/analyze.py $DATA_DIR/field.json               # analyze a sim JSON with per-hand logs
+    python tools/analyze.py $DATA_DIR/field.json --hero agent  # whose view (bot name or file); default bot A
+    python tools/analyze.py $DATA_DIR/field.json --generate --hero agent.py \\
         --field tools/opponents/*.py baseline-bots/*.py --deals 200 --seeds 1
                                                      # run the matches first (with logs), then analyze
 
@@ -31,8 +33,21 @@ Columns
 -------
 hands      hands in the cell (each deal is played twice, once per seat)
 bb/hand    hero's mean net per hand in the cell, in big blinds
-bb/deal    the cell's contribution to overall bb/deal (cell total / deals);
-           the rows of every table sum to the overall bb/deal, the judged number.
+bb/deal    the cell's contribution to overall bb/deal (cell total / all deals),
+           except in the opponent table (see below).
+
+Which tables sum: the rows of every table (street reached, position, preflop pct,
+each "<street> 1st act" table, and the opponent table's "share of total" column)
+sum to the overall bb/deal, the judged number. In a "<street> 1st act" table the
+"-" row holds hands where the hero did not act on that street (the hand ended
+earlier, a walk, or an all-in run-out), so every hand appears exactly once.
+The opponent table's "bb/deal" column is bb/deal against that opponent (its total
+/ that opponent's deals), matching sim.py's per-opponent number; those rows do not
+sum to the overall number.
+
+"street reached" is the last street whose cards were dealt, so it includes
+all-in run-outs: a preflop all-in that ran the board out counts as
+"RIVER (showdown)".
 """
 from __future__ import annotations
 
@@ -155,23 +170,36 @@ class Cell:
         self.bb += bb
 
 
-def _table(title: str, cells: dict[str, Cell], deals: int, order: Optional[list[str]] = None) -> None:
+def _table(title: str, cells: dict[str, Cell], deals: int, order: Optional[list[str]] = None,
+           own_deals: Optional[dict[str, int]] = None) -> None:
+    """Print one breakdown. With own_deals, bb/deal is per row's own deals and a
+    'share of total' column (row total / all deals) is added."""
     keys = order if order is not None else sorted(cells)
     keys = [k for k in keys if k in cells]
     w = max([len(title)] + [len(k) for k in keys]) + 2
-    print(f"\n{title:<{w}}{'hands':>8}{'%hands':>8}{'bb/hand':>10}{'bb/deal':>10}")
+    extra = f"{'share of total':>16}" if own_deals is not None else ""
+    print(f"\n{title:<{w}}{'hands':>8}{'%hands':>8}{'bb/hand':>10}{'bb/deal':>10}{extra}")
     total_n = sum(c.n for c in cells.values()) or 1
     for k in keys:
         c = cells[k]
-        print(f"{k:<{w}}{c.n:>8}{100 * c.n / total_n:>7.1f}%{c.bb / c.n:>+10.3f}{c.bb / deals:>+10.3f}")
+        if own_deals is not None:
+            tail = f"{c.bb / (own_deals.get(k) or 1):>+10.3f}{c.bb / deals:>+16.3f}"
+        else:
+            tail = f"{c.bb / deals:>+10.3f}"
+        print(f"{k:<{w}}{c.n:>8}{100 * c.n / total_n:>7.1f}%{c.bb / c.n:>+10.3f}{tail}")
 
 
 def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> int:
-    matches = [m for m in data.get("matches", []) if "crash" not in m]
+    all_matches = data.get("matches", [])
+    matches = [m for m in all_matches if "crash" not in m]
+    if len(matches) < len(all_matches):
+        print(f"warning: skipping {len(all_matches) - len(matches)} crashed match(es); "
+              "overall bb/deal may differ from sim's", file=sys.stderr)
     by_street: dict[str, Cell] = defaultdict(Cell)
     by_pos: dict[str, Cell] = defaultdict(Cell)
     by_bucket: dict[str, Cell] = defaultdict(Cell)
     by_opp: dict[str, Cell] = defaultdict(Cell)
+    opp_deals: dict[str, int] = defaultdict(int)
     by_first: dict[str, dict[str, Cell]] = {s: defaultdict(Cell) for s in STREETS}
     by_sit: dict[tuple[str, str, str, str], Cell] = defaultdict(Cell)
     deals = 0
@@ -190,6 +218,7 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
         used += 1
         hero_name = hero_name or m.get(f"name_{side}")
         deals += int(m.get("deals", 0))
+        opp_deals[str(m.get("name_b" if side == "a" else "name_a", "?"))] += int(m.get("deals", 0))
         sign = 1 if side == "a" else -1
         has_paired = has_paired or "paired_bb" in m
         paired_total += sign * sum(m.get("paired_bb", []))
@@ -199,8 +228,8 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
             by_pos[h["pos"]].add(bb)
             by_bucket[h["bucket"]].add(bb)
             by_opp[h["opp"]].add(bb)
-            for s, act in h["first"].items():
-                by_first[s][act].add(bb)
+            for s in STREETS:  # '-' = hero did not act on s, so each table sums
+                by_first[s][h["first"].get(s, "-")].add(bb)
             by_sit[(h["street"], h["pos"], h["bucket"], h["last_act"])].add(bb)
 
     if not used:
@@ -217,14 +246,18 @@ def analyze(data: dict[str, Any], hero: Optional[str] = None, top: int = 10) -> 
     print(f"Overall {total / deals:+.3f} bb/deal{check}")
 
     street_order = [s + sd for s in STREETS for sd in ("", " (showdown)")]
+    print("\n(street reached includes all-in run-outs: a preflop all-in with the board "
+          "run out is RIVER (showdown))")
     _table("street reached", by_street, deals, street_order)
     _table("position", by_pos, deals, ["BTN", "BB"])
     _table("preflop pct", by_bucket, deals)
     if len(by_opp) > 1:
+        print("\n(opponent bb/deal = vs that opponent, as in sim.py; "
+              "share of total = contribution to overall)")
         _table("opponent", by_opp, deals,
-               sorted(by_opp, key=lambda k: by_opp[k].bb))
+               sorted(by_opp, key=lambda k: by_opp[k].bb), own_deals=opp_deals)
     for s in STREETS:
-        if by_first[s]:
+        if set(by_first[s]) - {"-"}:  # '-' = hero did not act on that street
             _table(f"{s.lower()} 1st act", by_first[s], deals,
                    sorted(by_first[s], key=lambda k: by_first[s][k].bb))
 
