@@ -10,27 +10,26 @@ per-decision budget:
     n  = timing.samples_for(ms)              # optional: ms -> omaha_score calls
 
 Guarantees:
-    * A reserve slice of the bank (RESERVE_FRAC of it, at least RESERVE_MIN_S:
-      1.0 s of the real 8 s, 0.5 s of the 4 s test bank) is never handed out,
-      so time is still unused at hand 1000 even if the estimates are off.
+    * A reserve slice of the bank (RESERVE_FRAC of it: 1.5 s of 8 s, 0.75 s of
+      4 s, never under RESERVE_MIN_S) is never handed out, so time is still
+      unused at hand 1000 even if the estimates are off.
     * An allowance for per-decision overhead (wrapper, JSON, non-MC policy
       code) is held back for every decision still to come, so Monte Carlo can
-      never starve the cheap decisions at the end of the half.
+      never starve the cheap decisions at the end of the half. Before warm-up
+      the allowance uses pessimistic priors; after WARMUP_HANDS it uses the
+      measured overhead (never below the 0.5 ms agent.py always charges) and
+      the observed decisions per hand.
     * Each budget is 0 (inside the reserve: play the cheap path) or lies in
-      [FLOOR_MS, CEIL_MS].
-    * Spending is spread evenly over the decisions that will ask for a budget
-      (postflop ones; preflop never calls this), and weighted towards big pots
-      and the flop/turn.
+      [FLOOR_MS, CEIL_MS]. FLOOR_MS is above postflop's Monte Carlo minimum
+      (PARAMS min_budget_ms / budget_frac = 0.3125 ms), so a non-zero budget
+      always buys samples instead of the made-hand fallback.
+    * Spending is spread evenly over the decisions expected to still ask for
+      a budget (postflop ones; preflop uses the table and never calls here),
+      and weighted towards big pots and the flop/turn.
 
 Call budget_ms exactly once per decision that uses Monte Carlo: it records what
 it granted so it can measure the true overhead from memory["_spent"], and how
-many decisions ask for a budget so it knows how many ways to split the bank.
-
-Note on agent.py's accounting: it charges real time + 0.5 ms per decision and
-ignores the judge's 1 ms grace, so memory["_time_left"] runs about 1 ms per
-decision below what the judge has really charged. This module budgets against
-agent.py's number (the one that triggers its 0.25 s emergency stop), so the
-judge-side charge always comes out lower still.
+often it is called so it knows what share of decisions want a budget.
 """
 from __future__ import annotations
 
@@ -41,27 +40,25 @@ from evaluator import NUM_CARDS, omaha_score, warmup
 from game import NUM_DEALS, STARTING_STACK, TIME_BANK_SECONDS, Street
 
 # --- tunables ---------------------------------------------------------------
-RESERVE_FRAC = 0.125       # share of the bank never granted (1.0 s of 8 s, 0.5 s of 4 s)
-RESERVE_MIN_S = 0.4        # the reserve never shrinks below this (agent.py stops at 0.25 s)
-FLOOR_MS = 0.4             # smallest non-zero budget: the equity engine runs its
-                           # minimum sample count anyway below ~0.3 ms, and postflop
-                           # skips Monte Carlo under 0.31 ms (min_budget_ms / budget_frac)
-CEIL_MS = 25.0             # largest single budget: postflop hands at most 20 ms
-                           # (0.8 x 25) to the equity engine, more would be wasted
+RESERVE_S = 1.5            # never granted at the 8 s bank: charged time <= 6.5 s
+RESERVE_FRAC = RESERVE_S / TIME_BANK_SECONDS   # the reserve scales with the bank
+RESERVE_MIN_S = 0.5        # but never below this (agent.py's own cutoff is 0.25 s)
+FLOOR_MS = 0.4             # smallest non-zero budget; above postflop's MC minimum
+CEIL_MS = 12.0             # largest single budget: ~25k flop samples, more adds
+                           # no precision and only exposes the equity overrun (#28)
 MAX_SHARE = 0.03           # one decision gets at most 3% of what is spendable
 
 WRAPPER_OVERHEAD_MS = 0.5  # agent.py charges this per decision on top of real time
 POLICY_OVERHEAD_MS = 0.15  # non-MC policy work per decision at reference speed
-OVERHEAD_MARGIN = 1.1      # safety factor on the overhead allowance (the allowance is
-                           # re-measured every decision; the reserve covers drift)
+OVERHEAD_MARGIN = 1.25     # safety factor on the prior overhead allowance
+MEASURED_MARGIN = 1.1      # safety factor once the overhead is measured
 
 PRIOR_DECISIONS_PER_HAND = 2.5   # until we have observed enough hands
-MIN_OVERHEAD_DPH = 3.0           # overhead allowance never assumes fewer than this
+MIN_OVERHEAD_DPH = 3.0           # before warm-up the allowance assumes at least this
 WORST_DECISIONS_PER_HAND = 8     # exhaustive search of the game tree (non-button seat)
-PRIOR_MC_FRAC = 0.7              # share of decisions that call budget_ms, until measured
-                                 # (postflop decisions; ~0.6 observed vs the sparring bots)
-MIN_MC_FRAC = 0.2                # never assume fewer askers than this (keeps budgets sane)
 WARMUP_HANDS = 20                # hands before observed rates replace priors
+WARMUP_DECISIONS = 50            # decisions before the measured overhead is trusted
+MIN_BUDGET_SHARE = 0.25          # assume at least this share of decisions ask for a budget
 
 STREET_WEIGHT = {
     Street.PREFLOP: 0.25,  # mostly table lookups
@@ -130,8 +127,8 @@ def overhead_prior_ms() -> float:
     return WRAPPER_OVERHEAD_MS + POLICY_OVERHEAD_MS * _speed
 
 
-def reserve_s(bank: float = TIME_BANK_SECONDS) -> float:
-    """Seconds of the bank that are never granted to Monte Carlo."""
+def reserve_s(bank: float) -> float:
+    """Seconds of the bank that are never handed out (1.5 s at 8 s, 0.75 s at 4 s)."""
     return max(RESERVE_MIN_S, RESERVE_FRAC * float(bank))
 
 
@@ -151,8 +148,9 @@ def budget_ms(memory: dict, obs) -> float:
     hand = max(0, int(getattr(obs, "hand_index", 0)))
     hands_left = max(1, num_hands - hand)          # includes this hand
     decisions = int(memory.get("_decisions", 0))   # finished decisions this half
-    calls = int(memory.get("_tb_calls", 0)) + 1    # budget requests, this one included
+    calls = int(memory.get("_tb_calls", 0)) + 1    # budget requests incl. this one
     memory["_tb_calls"] = calls
+    warm = hand >= WARMUP_HANDS and decisions >= WARMUP_DECISIONS
 
     # Decisions per hand: observed once we have enough hands; during warm-up the
     # larger of the prior and what we have seen so far (never optimistic early).
@@ -161,26 +159,30 @@ def budget_ms(memory: dict, obs) -> float:
         seen = min(float(WORST_DECISIONS_PER_HAND), max(1.0, decisions / hand))
         dph = seen if hand >= WARMUP_HANDS else max(dph, seen)
 
-    # Share of decisions that ask for a budget (preflop never does). Same rule:
-    # the prior until warm-up, never fewer askers than seen so far.
-    mc_frac = PRIOR_MC_FRAC
-    if hand >= 3 and decisions > 0:
-        seen_frac = min(1.0, max(MIN_MC_FRAC, (calls - 1) / decisions))
-        mc_frac = seen_frac if hand >= WARMUP_HANDS else max(mc_frac, seen_frac)
-    remaining = max(1.0, hands_left * dph * mc_frac)   # budget requests still to come
-
-    # Overhead per decision: never below the prior, raised if measurement says so.
-    # (spent - granted) also absorbs any Monte Carlo overrun of its budget.
+    # Overhead per decision for every decision still to come. Priors with a
+    # fat margin until warm-up; then what agent.py actually charged beyond
+    # the budgets we granted (this includes Monte Carlo overshooting its
+    # budget), never below the wrapper's fixed charge.
     granted = float(memory.get("_tb_granted_s", 0.0))
     spent = float(memory.get("_spent", bank - time_left))
-    over_ms = overhead_prior_ms()
-    if decisions >= 50:
-        over_ms = max(over_ms, (spent - granted) / decisions * 1000.0)
-    allowance_s = hands_left * max(dph, MIN_OVERHEAD_DPH) * over_ms * OVERHEAD_MARGIN / 1000.0
+    if warm:
+        measured_ms = (spent - granted) / decisions * 1000.0
+        over_ms = max(WRAPPER_OVERHEAD_MS, measured_ms)
+        allowance_s = hands_left * dph * over_ms * MEASURED_MARGIN / 1000.0
+    else:
+        over_ms = overhead_prior_ms()
+        allowance_s = hands_left * max(dph, MIN_OVERHEAD_DPH) * over_ms * OVERHEAD_MARGIN / 1000.0
 
     spendable_ms = (time_left - reserve_s(bank) - allowance_s) * 1000.0
     if spendable_ms <= FLOOR_MS:
         return 0.0
+
+    # Decisions still to come that will ask for a budget: all of them until we
+    # know better, then the observed share (preflop never asks).
+    share = 1.0
+    if warm:
+        share = min(1.0, max(MIN_BUDGET_SHARE, (calls - 1) / decisions))
+    remaining = max(1.0, hands_left * dph * share)
 
     # Spread evenly: weight / (mean weight) gets this decision's share.
     w = _weight(obs)
