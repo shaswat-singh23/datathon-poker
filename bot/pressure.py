@@ -147,7 +147,9 @@ def postflop_action(obs, memory, budget_ms, rng=None) -> Action:
             rng = random.Random(rng)
         elif not callable(getattr(rng, "random", None)):
             rng = random.Random(_pf._seed(obs))
-        eq = _pf.estimate_equity(obs, memory, budget_ms, pp, rng)
+        # same equity as bot.postflop.postflop_action, incl. #70's line discount
+        scale = _pf.discount_scale(_pf.observe_aggression(obs, memory, pp), pp)
+        eq = _pf.estimate_equity(obs, memory, budget_ms, pp, rng) - _pf.line_discount(obs, pp, scale)
         a = _pf.decide(eq, obs, pp, rng)
         if a == Action.CHECK_CALL and int(obs.to_call) == 0:
             try:

@@ -11,7 +11,7 @@ Follow "Picking a task" and "Working a task" in AGENTS.md exactly.
 1. **Choose.** If no number was given, list unassigned open issues by priority:
    `gh issue list --state open --search "no:assignee" --label must`, then `should`, then `nice`.
    Pick the oldest one whose Depends on issues are all closed (`gh issue view <dep> --json state`). Say which you picked and why.
-2. **Claim.** `gh issue edit N --add-assignee @me`, then `gh issue view N --json assignees`. If anyone else is assigned, unassign yourself and go back to step 1.
+2. **Claim.** Your other sessions share your GitHub login, so assignees can't tell them apart. First run `git worktree list`: if a worktree whose name starts with `N-` exists in this clone, another of your sessions has it, so pick another. Then `gh issue edit N --add-assignee @me`, then `gh issue view N --json assignees`. If anyone else is assigned, unassign yourself and go back to step 1.
 3. **Isolate.** If this session isn't already in a worktree, enter one named `N-<short-slug>`. Then run `git fetch origin && git rebase origin/master`, so the ticket starts from the latest master, including anything merged since this clone last fetched.
 4. **Plan.** Read the issue, then state in a few lines how you'll meet each Done-when item inside Scope.
 5. **Build.** Stay inside Scope. Work you find outside Scope gets a new issue (as in /ticket), not a fix. Commit as `#N: <what>`.

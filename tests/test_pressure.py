@@ -99,12 +99,15 @@ def test_min_street_and_min_fold(fixed_eq):
     fixed_eq["eq"] = 0.35
     for _ in range(100):
         obs = _check_spot(rng)
+        # pressure adds nothing below min_street or vs a 20% folder: the action is
+        # whatever bot.postflop already does there (which may be a #70 flop stab)
+        base = P.postflop_action(obs, {}, 5.0)
         mem = {"opp_model": _Model(fold=0.6), "pressure_params": {"min_street": 3}}
         a = PR.postflop_action(obs, mem, 5.0)
         if obs.street != Street.RIVER:
-            assert a == Action.CHECK_CALL
+            assert a == base
         mem = {"opp_model": _Model(fold=0.2)}
-        assert PR.postflop_action(obs, mem, 5.0) == Action.CHECK_CALL
+        assert PR.postflop_action(obs, mem, 5.0) == base
 
 
 def test_real_model_and_broken_model_never_raise(fixed_eq, monkeypatch):
