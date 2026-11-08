@@ -1,11 +1,68 @@
-# Fold-equity ("pressure") betting from the opponent model's fold-to-bet rate
-- Issue: #68 | Author: Kyle (Claude Code, /improve) | Time: 17:45
-- Claim: `bot/pressure.py` (fold-equity betting: when checked to us postflop, bet half pot if the EV of the bet against the opponent model's measured fold-to-bet and raise-vs-bet rates beats checking) raises the field result from **26.5 to 28.0 / 36 at the 8 s bank** (+2.978 → +3.199 bb/deal) and from **27.0 to 27.5 / 36 at the 4 s bank** (+2.961 → +3.138 bb/deal), in paired off/on runs on fresh seeds. Losses drop from 7 to 2 matches at both banks: tag goes from 0/3 to 1.5/3 (−1.97 → −0.52 bb/deal at 8 s), exploiter from 0/3 to 0.5/3 (−2.11 → −1.07), nit from 1/3 to 2/3 (−0.47 → +0.50). The cost is potodds (−0.56 / −0.63 bb/deal, 3 → 2 and 1.5 points) and lag (−0.80 at 8 s, still 3/3). 0 errors, 0 forfeits, 0 empty banks in 288 hero halves; the module adds no Monte Carlo work (max CPU per call 18 ms).
-- Evidence: `tools/sim.py`, duplicate format, 1000 deals per match, `--procs 3`, 10-core Mac shared with other sessions' sims (1-min load in the tables). Branch `68-pressure` on master `748c08a`. "off" is the same code with the module disabled (`PRESSURE=off`), i.e. master's play; "on" is `bot/pressure.py` at its default PARAMS. Off and on use the same seeds, so every comparison is paired by deal.
-- So what: this is the first change that scores against the two Monte Carlo sparring bots (tag, exploiter), the closest stand-ins for a thinking student bot, and it does so by reading the opponent rather than by retuning thresholds, so it should carry over to unknown bots that fold too much to a half-pot bet while leaving stations alone (calling_station −0.2 bb/deal, inside noise). The potodds/lag leak (betting into bots that call or raise light) is the obvious follow-up: gate the bet on the opponent's raise-vs-bet rate more strongly, or on position. Recommend merging and making it the new submission candidate after the final SHA gate (#57).
+# Fold-equity ("pressure") betting: no gain on top of #69 / #70 (negative result)
+- Issue: #68 | Author: Kyle (Claude Code) | Time: 21:35
+- Claim: on current master (#69 exploit deltas, #70 line discounts + flop stabs, #77 sparring bots, #82 cbetter gate), `bot/pressure.py` **adds nothing on points and costs points at 4 s**: **44.0 vs 44.0 / 45 at the 8 s bank** (+3.635 vs +3.605 bb/deal) and **43.5 vs 44.5 / 45 at the 4 s bank** (+3.637 vs +3.632 bb/deal). Mean bb/deal is flat (Δ +0.03 / +0.005, well inside the overall CI of ±0.16). It still gains, CI-significantly, against the folders (tag +0.42 / +0.59, nit +0.26 / +0.36, exploiter +0.51 at 8 s, fitorfold +0.37 at 4 s), but every one of those is already a 3/3 win on master, so there are no points to take. It loses, CI-significantly, against baseline_calling_station (−0.36 / −0.41), cbetter (−0.61 / −0.44, which drops cbetter from 2.5 to 2.0 points at 4 s) and lag at 4 s (−0.87), and trappy slips from 3.0 to 2.5 at 4 s. The earlier +1.5 points (26.5 → 28.0 / 36) was measured against pre-#70 master, when we were losing to tag and exploiter; #70's flop stabs and #69's exploit deltas have since taken that fold equity.
+- Evidence: `tools/sim.py --hero agent.py --field tools/opponents/*.py baseline-bots/*.py --seeds 3 --seed-base p68b --procs 3 --time-bank {8,4}`, 15 opponents × 3 seeds × 1000 deals, duplicate format. Branch `68-pressure` at b07b859 (origin/master a4eafee merged in) vs master `d7c334f` (a4eafee plus a findings-only commit) from a detached worktree run from its own root. Four runs back to back, same seeds, so the per-opponent Δ is paired by deal.
+- So what: do not merge. The aggression this module adds against folders is already in master through #70 and #69, and what remains costs value against stations, cbetter and lag. Points are the scoring metric and they are flat at 8 s and down at 4 s.
 - Checked by: unchecked
 
-## The idea
+## Re-measurement on current master (15 bots, seed base `p68b`)
+Fix carried in the merge: `bot/pressure.py` previously recomputed equity the pre-#70 way and would have silently dropped #70's `line_discount` / `observe_aggression` scaling. It now applies the same discount as `bot.postflop.postflop_action`, so its only difference from master is the pressure bet itself. `tests/test_pressure.py::test_min_street_and_min_fold` now compares against base postflop, since #70 flop-stabs at eq 0.35. `python -m pytest -q`: 481 passed. `test_agent.py`: 18 passed.
+
+Load (1-min, `sysctl vm.loadavg`), with no other sim running at any start:
+
+| run | load before | peak | after |
+|---|---|---|---|
+| branch 8 s | 5.55 | 8.26 | 7.57 |
+| master 8 s | 6.41 | 10.65 | 7.59 |
+| branch 4 s | 7.59 | 7.59 | 5.01 |
+| master 4 s | 5.01 | 5.92 | 5.90 |
+
+N = matches per opponent (3 × 1000 deals). Δ is branch − master per deal, paired, 95% CI.
+
+**8 s bank: master 44.0 / 45, +3.605 [+3.451, +3.759] (43-0-2); branch 44.0 / 45, +3.635 [+3.476, +3.793] (43-0-2)**
+
+| opponent | N | master bb/deal [95% CI] | W-L-C | pts | branch bb/deal [95% CI] | W-L-C | pts | Δ [95% CI] |
+|---|---|---|---|---|---|---|---|---|
+| baseline_calling_station | 3 | +10.162 [+9.632, +10.691] | 3-0-0 | 3.0 | +9.803 [+9.268, +10.338] | 3-0-0 | 3.0 | -0.359 [-0.428, -0.290] |
+| baseline_always_half | 3 | +8.754 [+7.891, +9.617] | 3-0-0 | 3.0 | +8.791 [+7.928, +9.653] | 3-0-0 | 3.0 | +0.037 [-0.061, +0.134] |
+| baseline_random | 3 | +6.174 [+5.384, +6.965] | 3-0-0 | 3.0 | +6.142 [+5.335, +6.950] | 3-0-0 | 3.0 | -0.032 [-0.780, +0.716] |
+| maniac | 3 | +5.738 [+4.754, +6.722] | 3-0-0 | 3.0 | +5.751 [+4.762, +6.740] | 3-0-0 | 3.0 | +0.013 [-0.396, +0.422] |
+| baseline_always_pot | 3 | +5.566 [+4.584, +6.547] | 3-0-0 | 3.0 | +5.636 [+4.654, +6.619] | 3-0-0 | 3.0 | +0.070 [-0.102, +0.243] |
+| lag | 3 | +4.301 [+3.682, +4.919] | 3-0-0 | 3.0 | +4.564 [+3.926, +5.203] | 3-0-0 | 3.0 | +0.264 [-0.273, +0.800] |
+| potodds | 3 | +3.406 [+2.921, +3.892] | 3-0-0 | 3.0 | +3.395 [+2.893, +3.898] | 3-0-0 | 3.0 | -0.011 [-0.324, +0.302] |
+| honest | 3 | +3.060 [+2.586, +3.533] | 3-0-0 | 3.0 | +2.818 [+2.337, +3.299] | 3-0-0 | 3.0 | -0.242 [-0.606, +0.122] |
+| exploiter | 3 | +1.268 [+0.901, +1.636] | 3-0-0 | 3.0 | +1.774 [+1.305, +2.242] | 3-0-0 | 3.0 | +0.505 [+0.116, +0.894] |
+| fitorfold | 3 | +1.089 [+0.810, +1.369] | 3-0-0 | 3.0 | +1.310 [+0.988, +1.632] | 3-0-0 | 3.0 | +0.221 [-0.049, +0.491] |
+| cbetter | 3 | +1.037 [+0.507, +1.566] | 1-0-2 | 2.0 | +0.429 [-0.123, +0.981] | 1-0-2 | 2.0 | -0.607 [-0.970, -0.245] |
+| nit | 3 | +1.022 [+0.817, +1.227] | 3-0-0 | 3.0 | +1.280 [+1.066, +1.494] | 3-0-0 | 3.0 | +0.258 [+0.081, +0.435] |
+| tag | 3 | +0.868 [+0.578, +1.158] | 3-0-0 | 3.0 | +1.285 [+0.913, +1.657] | 3-0-0 | 3.0 | +0.417 [+0.107, +0.727] |
+| trappy | 3 | +0.851 [+0.568, +1.134] | 3-0-0 | 3.0 | +0.739 [+0.416, +1.062] | 3-0-0 | 3.0 | -0.112 [-0.342, +0.118] |
+| rock_shover | 3 | +0.774 [+0.548, +0.999] | 3-0-0 | 3.0 | +0.805 [+0.573, +1.037] | 3-0-0 | 3.0 | +0.031 [-0.048, +0.110] |
+
+**4 s bank: master 44.5 / 45, +3.632 [+3.479, +3.786] (44-0-1); branch 43.5 / 45, +3.637 [+3.479, +3.795] (42-0-3)**
+
+| opponent | N | master bb/deal [95% CI] | W-L-C | pts | branch bb/deal [95% CI] | W-L-C | pts | Δ [95% CI] |
+|---|---|---|---|---|---|---|---|---|
+| baseline_calling_station | 3 | +10.185 [+9.655, +10.716] | 3-0-0 | 3.0 | +9.774 [+9.240, +10.309] | 3-0-0 | 3.0 | -0.411 [-0.484, -0.338] |
+| baseline_always_half | 3 | +8.742 [+7.879, +9.604] | 3-0-0 | 3.0 | +8.707 [+7.845, +9.570] | 3-0-0 | 3.0 | -0.034 [-0.180, +0.112] |
+| maniac | 3 | +5.857 [+4.882, +6.832] | 3-0-0 | 3.0 | +6.018 [+5.044, +6.993] | 3-0-0 | 3.0 | +0.161 [-0.231, +0.554] |
+| baseline_random | 3 | +5.755 [+4.964, +6.547] | 3-0-0 | 3.0 | +6.493 [+5.673, +7.313] | 3-0-0 | 3.0 | +0.738 [-0.030, +1.505] |
+| baseline_always_pot | 3 | +5.572 [+4.587, +6.556] | 3-0-0 | 3.0 | +5.553 [+4.569, +6.536] | 3-0-0 | 3.0 | -0.019 [-0.233, +0.196] |
+| lag | 3 | +4.932 [+4.315, +5.549] | 3-0-0 | 3.0 | +4.059 [+3.424, +4.695] | 3-0-0 | 3.0 | -0.872 [-1.392, -0.352] |
+| potodds | 3 | +3.606 [+3.126, +4.085] | 3-0-0 | 3.0 | +3.323 [+2.820, +3.826] | 3-0-0 | 3.0 | -0.282 [-0.594, +0.029] |
+| honest | 3 | +2.986 [+2.521, +3.452] | 3-0-0 | 3.0 | +2.662 [+2.181, +3.143] | 3-0-0 | 3.0 | -0.324 [-0.716, +0.068] |
+| exploiter | 3 | +1.180 [+0.838, +1.522] | 3-0-0 | 3.0 | +1.552 [+1.091, +2.013] | 3-0-0 | 3.0 | +0.372 [-0.017, +0.760] |
+| fitorfold | 3 | +1.137 [+0.850, +1.425] | 3-0-0 | 3.0 | +1.509 [+1.201, +1.817] | 3-0-0 | 3.0 | +0.372 [+0.120, +0.624] |
+| cbetter | 3 | +1.058 [+0.534, +1.582] | 2-0-1 | 2.5 | +0.614 [+0.062, +1.167] | 1-0-2 | 2.0 | -0.444 [-0.802, -0.086] |
+| nit | 3 | +0.983 [+0.781, +1.184] | 3-0-0 | 3.0 | +1.339 [+1.122, +1.555] | 3-0-0 | 3.0 | +0.356 [+0.170, +0.542] |
+| trappy | 3 | +0.874 [+0.596, +1.153] | 3-0-0 | 3.0 | +0.675 [+0.352, +0.998] | 2-0-1 | 2.5 | -0.199 [-0.417, +0.019] |
+| tag | 3 | +0.855 [+0.564, +1.146] | 3-0-0 | 3.0 | +1.448 [+1.072, +1.824] | 3-0-0 | 3.0 | +0.593 [+0.284, +0.903] |
+| rock_shover | 3 | +0.759 [+0.535, +0.984] | 3-0-0 | 3.0 | +0.828 [+0.596, +1.059] | 3-0-0 | 3.0 | +0.068 [-0.020, +0.156] |
+
+**Safety (hero, all 4 runs):** 0 errors, 0 forfeits, 0 bank empties (opponents also 0 / 0). Max decision CPU: branch 10.9 / 10.6 ms, master 10.7 / 9.9 ms (8 s / 4 s). Max decision wall: branch 513.8 / 34.5 ms, master 63.8 / 322.4 ms. Each side has one wall-clock spike over 100 ms in one of its two runs, while CPU stays under 11 ms, so these are scheduler stalls on the shared Mac (see the sim-load notes), not compute. Max half think: branch 5.95 / 2.96 s, master 5.81 / 3.15 s.
+
+## Earlier measurement (pre-#70 master 748c08a, 12 bots, superseded by the section above)
+### The idea
 `tools/opponents/tag.py` folds to a bet whenever its Monte Carlo equity, minus 0.07 per raise we have made in the hand and 0.05 per raise this street, is below pot odds + 0.06. Against a half-pot bet (pot odds 0.25) after a preflop raise that is every hand under about 0.43 equity on the flop and 0.57 on the river: 40 to 60% of its range. `bot/postflop.py` only bluffs 10% of the time, turn and river, with equity under 0.20, so that fold equity went unused. `exploiter.py` and `nit.py` fold similarly often, the baselines and `maniac` almost never.
 
 `bot/pressure.py` wraps `bot.postflop.postflop_action`: same equity estimate (one Monte Carlo call), same `decide()`; the only change is that when it is checked to us and `decide` would check, it bets half pot if
@@ -16,7 +73,7 @@
 
 where pf = `OpponentModel.fold_to_bet(street)` and pr = `raise_vs_bet(street)`, both shrunk toward heads-up priors with 8 pseudo-observations, so the bet frequency only moves once the model has seen the opponent fold. Defaults: called_shift 0.20, margin 0.03, flop onward, pf >= 0.25. Cost: a few float operations per decision; no new Monte Carlo.
 
-## Parameter sweep (screening set, 1 seed `sim-0`, 1000 deals, 8 s bank)
+### Parameter sweep (screening set, 1 seed `sim-0`, 1000 deals, 8 s bank)
 `tools/sweep_pressure.py --procs 3 --variants off,default,s10,s35,m0,m8,turn,potbig` (load 12 to 42). bb/deal per opponent; a 1000-deal match has a CI of roughly ±0.4 bb/deal, so single-opponent differences under that are noise.
 
 | variant | change from default | pts / 6 | mean bb/deal | calling_station | potodds | trappy | nit | exploiter | tag | max CPU ms |
@@ -32,7 +89,7 @@ where pf = `OpponentModel.fold_to_bet(street)` and pr = `raise_vs_bet(street)`, 
 
 Every variant beats off. The default is best; betting the flop matters (turn-only gives back 0.6 bb/deal vs tag), pot-size bets lose to potodds and trappy, and a larger margin or called_shift bets too rarely vs tag. The gains come from tag (+1.7), exploiter (+0.8) and nit (+0.5); potodds (−0.5) and trappy (−0.1) pay for some of it. 0 errors, 0 empty banks in every run.
 
-## Full field (12 bots, 3 seeds × 1000 deals, seed base `p68`, fresh seeds not used in the sweep)
+### Full field (12 bots, 3 seeds × 1000 deals, seed base `p68`, fresh seeds not used in the sweep)
 Commands (each run once, one after the other, module toggled by `PRESSURE=off`):
 ```
 .venv/bin/python tools/sim.py --hero agent.py --field tools/opponents/*.py baseline-bots/*.py --seeds 3 --seed-base p68 --time-bank 8 --procs 3 --quiet --json data/68-field-tb8-{off,on}.json
@@ -77,7 +134,7 @@ Load (1-min) 9.8 to 13.6 throughout. Bar for reference (`findings/46-agent-grace
 | **total** | **+2.961** | 25-7-4 | **27.0 / 36** | **+3.138** | 21-2-13 | **27.5 / 36** | +0.177 |
 
 
-## Safety
+### Safety
 Max call wall ms includes OS scheduling pauses on a box at load 10-20 (other sessions' sims); the bot's own CPU per call never exceeded 18 ms. No half emptied its bank (max think 5.86 s of 8, 3.12 s of 4).
 
 | run | errors | forfeits | timeouts | max half think s | mean dec ms | max call wall ms | max call CPU ms |
