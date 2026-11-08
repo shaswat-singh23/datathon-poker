@@ -15,7 +15,7 @@ play is #12.
 """
 from game import Street
 
-from bot import equity, exploit, postflop, preflop, timing
+from bot import equity, exploit, postflop, preflop, timing, vs_cbet
 
 try:
     from bot import opponent_model as _om
@@ -51,6 +51,7 @@ def new_half(config, memory):
 def choose_action(obs, memory):
     _observe(memory, "observe_action", obs)
     exploit.apply(memory)
+    vs_cbet.apply(obs, memory)  # after exploit.apply: it rewrites postflop_params every hand
     if obs.street == Street.PREFLOP:
         return preflop.preflop_action(obs, memory, equity.preflop_percentile(obs.hole_cards))
     return postflop.postflop_action(obs, memory, timing.budget_ms(memory, obs))
