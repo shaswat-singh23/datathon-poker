@@ -59,12 +59,32 @@ def opponent_checked(obs) -> bool:
     return any(not h.is_me and int(h.street) == street for h in (obs.action_history or ()))
 
 
+def opponent_called_our_bet(obs) -> bool:
+    """The opponent called one of our postflop bets earlier in this hand.
+
+    A call uncaps its range (a trapper check-calls strong hands, tools/opponents/
+    trappy.py), so a later check no longer means weakness: no automatic bet then.
+    """
+    last_raiser_me = False
+    for h in obs.action_history or ():
+        if int(h.street) == 0:
+            continue
+        if h.action in (Action.RAISE_HALF, Action.RAISE_POT):
+            last_raiser_me = bool(h.is_me)
+        elif not h.is_me and h.action == Action.CHECK_CALL and last_raiser_me:
+            return True
+        if not h.is_me and h.action == Action.CHECK_CALL:
+            last_raiser_me = False
+    return False
+
+
 def adjust(obs, memory, action):
     """Turn our check into a half-pot bet after an opponent check, unless switched off."""
     try:
         if (action == Action.CHECK_CALL and int(obs.street) != 0
                 and Action.RAISE_HALF in obs.legal_actions
-                and opponent_checked(obs) and enabled(memory)):
+                and opponent_checked(obs) and not opponent_called_our_bet(obs)
+                and enabled(memory)):
             memory["vs_check_bets"] = memory.get("vs_check_bets", 0) + 1
             return Action.RAISE_HALF
     except Exception:

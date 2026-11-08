@@ -108,3 +108,21 @@ def test_station_model_turns_off_with_real_opponent_model():
 
 def test_wired_in_policy():
     assert policy.vs_check is vs_check
+
+
+def test_no_auto_bet_after_opponent_called_our_bet():
+    # flop: we bet, it called; turn: it checks to us -> its range is no longer capped
+    hist = [act(True, CHECK, Street.PREFLOP, 1), act(False, CHECK, Street.PREFLOP),
+            act(False, CHECK, Street.FLOP), act(True, HALF, Street.FLOP, 2), act(False, CHECK, Street.FLOP, 2),
+            act(False, CHECK, Street.TURN)]
+    assert vs_check.opponent_called_our_bet(obs(hist, street=Street.TURN))
+    assert vs_check.adjust(obs(hist, street=Street.TURN), {}, CHECK) == CHECK
+
+
+def test_its_own_bet_called_by_us_does_not_count():
+    # flop: it bet, we called; turn: it checks -> still an auto-bet spot
+    hist = [act(True, CHECK, Street.PREFLOP, 1), act(False, CHECK, Street.PREFLOP),
+            act(False, HALF, Street.FLOP, 2), act(True, CHECK, Street.FLOP, 2),
+            act(False, CHECK, Street.TURN)]
+    assert not vs_check.opponent_called_our_bet(obs(hist, street=Street.TURN))
+    assert vs_check.adjust(obs(hist, street=Street.TURN), {}, CHECK) == HALF
