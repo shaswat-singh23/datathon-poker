@@ -110,7 +110,7 @@ def equity(obs, memory, samples):
             cache.clear()
             cache[key] = pf_equity(obs.hole_cards)
         else:
-            if memory.get("clock", 0.0) > memory.get("budget", 4.0):
+            if memory.get("clock", 0.0) > memory["budget"] * (obs.hand_index + 1) / memory["num_hands"]:
                 samples = max(12, samples // 6)
             cache[key] = mc_equity(obs.hole_cards, obs.board, samples, memory["rng"])
     return cache[key]
@@ -169,6 +169,10 @@ def choose_action(obs, memory):
 
 def new_half(config, memory):
     memory["rng"] = random.Random(12)
+    # Monte Carlo is the only time sink. Spend at most half the bank on it (4 s at the 8 s bank),
+    # paced evenly over the half; the sim also charges ~0.5 ms per call against the bank.
+    memory["budget"] = min(4.0, 0.5 * config.time_bank_seconds)
+    memory["num_hands"] = max(1, config.num_hands)
 
 
 def on_hand_end(result, memory):
