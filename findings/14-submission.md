@@ -59,6 +59,11 @@ Filled in by whoever submits the organizers' form. One row per submission or res
 
 | # | time (Central) | submitted by | SHA on the form | check_build | gate (#57) |
 |---|---|---|---|---|---|
-| 1 | _not yet recorded_ | | | | |
+| 1 | 2026-11-07 21:31 | Shaswat | `f203491f5c4266fdd285738cf32669c123cc1bba` | "passed" per Shaswat's #50 comment; no output recorded (note 1) | not gated: #78 says SUBMIT `05c1a8ec…`, not this SHA (note 2) |
+
+Notes on row 1. Source: Shaswat's comment on #50, 2026-11-07 21:31 CT: "Form filed 21:31 CT by Shaswat: The Conductors, f203491f5c4266fdd285738cf32669c123cc1bba." The time is when that comment says the form was filed.
+1. **check_build.** The only record is that comment ("check_build passed"). No output tail is pasted on #50, and no findings file has a run on `f203491`.
+2. **Gate.** The merged #78 gate (`findings/78-final-gate-2.md`) measured `05c1a8ecadbb1186c94a670796905fff9d73fc8c` and says SUBMIT that SHA. It names `f203491` only to say master had moved past it before the gate started. The comment's "34.5/36 @8s, 36.0/36 @4s vs 7a63b82's 24.5/18.0" matches neither table in that finding.
+3. **Open on #50.** The orchestrator asked (21:31 CST) that the form and the finding name the same SHA: re-file with `05c1a8e` and run check_build on it, or post which run produced the 34.5/36 numbers and its log path. When that is settled, add a row 2 below instead of editing row 1.
 
 Deadline (Central time): _to be pinned by the decider in AGENTS.md and on #50_.
